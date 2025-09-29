@@ -1,0 +1,55 @@
+## Cirrus CI: PR-only Linux FormatCheck
+task:
+  name: FormatCheck
+  only_if: $CIRRUS_PR != ''
+
+  container:
+    image: debian:bookworm-slim
+    cpu: 2
+    memory: 2G
+
+  format_check_script: |
+    set -euo pipefail
+    echo "[FormatCheck] Installing build dependencies..."
+    apt-get update -qq
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+      build-essential git ca-certificates
+
+    echo "[FormatCheck] Building pg_bsd_indent..."
+    make -C src/tools/pg_bsd_indent -j2
+
+    echo "[FormatCheck] Determining changed files..."
+    BASE="${CIRRUS_BASE_SHA:-}"
+    if [ -z "$BASE" ]; then
+      git fetch --quiet origin || true
+      for br in main master; do
+        if git rev-parse --verify --quiet origin/$br >/dev/null; then
+          BASE=$(git merge-base HEAD origin/$br) && break
+        fi
+      done
+      if [ -z "$BASE" ]; then
+        BASE=$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)
+      fi
+    fi
+    echo "BASE=$BASE"
+
+    files=$(git diff --name-only "$BASE"...HEAD | grep -E '\\.(c|h|cpp|hpp)$' | grep -v '^src/tools/pg_bsd_indent/' || true)
+    if [ -z "$files" ]; then
+      echo "[FormatCheck] No C/C++ changes detected; skipping."
+      exit 0
+    fi
+
+    export PGTYPEDEFS=$(pwd)/src/tools/pgindent/typedefs.list
+    export PGINDENT=$(pwd)/src/tools/pg_bsd_indent/pg_bsd_indent
+
+    echo "[FormatCheck] Running pgindent --check..."
+    set +e
+    ./src/tools/pgindent/pgindent --check $files
+    rc=$?
+    set -e
+    if [ $rc -ne 0 ]; then
+      echo "[FormatCheck] Unformatted changes detected; suggested patch below:"
+      ./src/tools/pgindent/pgindent --diff $files || true
+      exit $rc
+    fi
+    echo "[FormatCheck] Passed."
