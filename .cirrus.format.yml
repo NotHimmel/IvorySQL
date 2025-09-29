@@ -20,7 +20,9 @@ task:
     meson setup build --buildtype=release --auto-features=disabled
 
     echo "[FormatCheck] Building pg_bsd_indent via Meson..."
-    ninja -C build pg_bsd_indent
+
+    ninja -C build src/tools/pg_bsd_indent/pg_bsd_indent || ninja -C build pg_bsd_indent || ninja -C build
+
 
     echo "[FormatCheck] Determining changed files..."
     BASE="${CIRRUS_BASE_SHA:-}"
