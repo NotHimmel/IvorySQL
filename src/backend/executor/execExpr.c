@@ -82,10 +82,13 @@ static void ExecInitExprRec(Expr *node, ExprState *state,
 static void ExecInitFunc(ExprEvalStep *scratch, Expr *node, List *args,
 						 Oid funcid, Oid inputcollid,
 						 ExprState *state);
-static void ExecInitSubPlanExpr(SubPlan *subplan,
-								ExprState *state,
+static void ExecInitSubPlanExpr(      SubPlan *subplan,
+																	ExprState *state,
 								Datum *resv, bool *resnull);
-static void ExecCreateExprSetupSteps(ExprState *state, Node *node);
+static void ExecCreateExprSetupSteps(ExprState *state, 
+
+
+Node *node);
 static void ExecPushExprSetupSteps(ExprState *state, ExprSetupInfo *info);
 static bool expr_setup_walker(Node *node, ExprSetupInfo *info);
 static bool ExecComputeSlotInfo(ExprState *state, ExprEvalStep *op);
@@ -153,8 +156,8 @@ static void ExecInitJsonCoercion(ExprState *state, JsonReturning *returning,
 ExprState *
 ExecInitExpr(Expr *node, PlanState *parent)
 {
-	ExprState  *state;
-	ExprEvalStep scratch = {0};
+	ExprState     *       state;
+	ExprEvalStep 				scratch = {0};
 
 	/* Special case: NULL expression produces a NULL ExprState pointer */
 	if (node == NULL)
