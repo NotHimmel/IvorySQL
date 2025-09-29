@@ -13,7 +13,8 @@ task:
     echo "[FormatCheck] Installing build dependencies..."
     apt-get update -qq
     DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
-      build-essential git ca-certificates perl python3 meson ninja-build pkg-config
+      build-essential git ca-certificates perl python3 meson ninja-build pkg-config flex bison
+
 
     echo "[FormatCheck] Configuring minimal Meson build..."
     meson setup build --buildtype=release --auto-features=disabled
