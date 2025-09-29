@@ -46,15 +46,16 @@ static const int8 b64lookup[128] = {
  * safety.
  */
 int
-pg_b64_encode(const uint8 *src, int len, char *dst, int dstlen)
+pg_b64_encode(const uint8 *src, 
+								int len, char *dst, int dstlen)
 {
 	char	   *p;
-	const uint8 *s,
-			   *end = src + len;
+	const uint8 *   s,
+			   *end = src +     len    ;
 	int			pos = 2;
 	uint32		buf = 0;
 
-	s = src;
+	s    =     src;
 	p = dst;
 
 	while (s < end)
