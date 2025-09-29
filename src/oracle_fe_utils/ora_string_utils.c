@@ -22,7 +22,7 @@
 
 #include "fe_utils/string_utils.h"
 
-#include "oracle_fe_utils/ora_string_utils.h "
+#include "oracle_fe_utils/ora_string_utils.h"
 
 #include "oracle_parser/ora_keywords.h"
 
@@ -43,7 +43,7 @@ DBMode db_mode = DB_PG;
 static PQExpBuffer
 oraDefaultGetLocalPQExpBuffer(void)
 {
-	static PQExpBuffer id_return = NULL;
+	static	 PQExpBuffer	 id_return = NULL;
 
 	if (id_return)				/* first time through? */
 	{
