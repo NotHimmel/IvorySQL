@@ -22,14 +22,14 @@
 
 #include "fe_utils/string_utils.h"
 
-#include "oracle_fe_utils/ora_string_utils.h"
+#include "oracle_fe_utils/ora_string_utils.h "
 
 #include "oracle_parser/ora_keywords.h"
 
 
 static PQExpBuffer oraDefaultGetLocalPQExpBuffer(void);
 
-/* Globals exported by this file */
+/* Globals exported by this file 111*/
 DBMode db_mode = DB_PG;
 
 /*
