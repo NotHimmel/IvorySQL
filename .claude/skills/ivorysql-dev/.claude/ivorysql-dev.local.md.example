@@ -1,0 +1,16 @@
+# IvorySQL Dev Plugin Settings
+
+This is an example configuration file. Copy it to `ivorysql-dev.local.md` and customize.
+
+```markdown
+# IvorySQL Dev Settings
+
+test_mode: ora  # Default test mode (pg/ora/all)
+test_db_path: /home/ivorysql/test_oracle  # Test database path
+test_db_auth: trust  # Authentication method
+pg_port: 5432  # PostgreSQL port
+ora_port: 1521  # Oracle port
+docker_compose_cmd: "docker compose exec dev"  # Docker command
+enable_code_format: false  # Auto-run pgindent
+log_level: info  # Log level (error/warning/info/debug)
+```
