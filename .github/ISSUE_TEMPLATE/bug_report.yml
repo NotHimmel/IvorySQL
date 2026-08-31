@@ -61,13 +61,11 @@ body:
     id: server_encoding
     attributes:
       label: Server encoding
-      description: "`SHOW server_encoding`"
+      description: |
+        `SHOW server_encoding`. If it is not UTF8, please say which it is under "Anything else we need to know?".
       options:
         - UTF8
-        - GB18030
-        - SQL_ASCII
-        - EUC_CN
-        - Other / not sure
+        - Other
     validations:
       required: true
 
