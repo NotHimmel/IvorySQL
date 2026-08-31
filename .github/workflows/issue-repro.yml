@@ -111,7 +111,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y build-essential bison flex libreadline-dev \
-                libicu-dev zlib1g-dev libxml2-dev libxslt-dev libssl-dev
+                libicu-dev zlib1g-dev libxml2-dev libxslt-dev libssl-dev \
+                uuid-dev libossp-uuid-dev
 
       - name: Setup ccache
         uses: hendrikmuhs/ccache-action@v1.2
@@ -128,15 +129,20 @@ jobs:
           # 写成 `make && make install` 会让构建失败被静默跳过。
           set -eux -o pipefail
           ./configure --prefix="$PWD/inst" --with-icu --with-libxml \
-                      --with-libxslt --with-openssl --enable-rpath
-          # 只建 src 与 ivorysql_ora —— 复现不需要其余 contrib，
-          # 顺带避开 uuid-ossp 这类额外依赖。
+                      --with-libxslt --with-openssl --enable-rpath \
+                      --with-uuid=e2fs --with-ossp-uuid
+          # IvorySQL 的 initdb 会建这几个扩展，缺任何一个 initdb 就 FATAL：
+          #   plpgsql, plisql        —— 在 src 里
+          #   gb18030_2022           —— contrib
+          #   ivorysql_ora           —— contrib，其 preload_ora_misc.sql
+          #                             又 CREATE EXTENSION "uuid-ossp"
+          # 所以只建 src 是不够的，但也不必建整个 contrib。
           make -j"$(nproc)" -C src
           make -C src install
-          # initdb 会加载 gb18030_2022 这个 contrib 模块，缺了它 initdb 直接
-          # FATAL: could not access file "gb18030_2022"
-          make -C contrib/gb18030_2022 install
-          make -C contrib/ivorysql_ora install
+          for m in gb18030_2022 uuid-ossp ivorysql_ora; do
+            make -j"$(nproc)" -C "contrib/$m"
+            make -C "contrib/$m" install
+          done
           test -x "$PWD/inst/bin/initdb"        # 装好了才继续
 
       # 用户 SQL 通过 env 传入并由 node 写盘，绝不经过 shell 展开。
