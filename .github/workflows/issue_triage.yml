@@ -3,7 +3,8 @@ name: issue-triage
 # Validate bug reports filed through the Issue Form, in two tiers:
 #
 #   errors   fields that make the report impossible to act on at all.
-#            The issue is labelled `invalid` and closed as not planned.
+#            The issue is labelled `invalid`. Closing it is gated behind
+#            AUTO_CLOSE, which is off for now — see the comment in the script.
 #   warnings fields that look suspect but may still be usable.
 #            The issue is labelled `needs-verification` and left open.
 #
@@ -38,6 +39,12 @@ jobs:
           FIELDS: ${{ steps.parse.outputs.jsonString }}
         with:
           script: |
+            // Closing an issue is the only irreversible thing this workflow
+            // can do, so it stays off until the error rules have been watched
+            // for a while and shown to produce no false positives. Everything
+            // else — the labels and the explanation — works either way.
+            const AUTO_CLOSE = false;
+
             // Only jsonString is reliable; the action's per-field outputs
             // come back empty.
             const f = JSON.parse(process.env.FIELDS || "{}");
@@ -181,14 +188,21 @@ jobs:
             const lines = [MARK];
             if (errors.length) {
               lines.push(
-                "Thanks for the report. It is missing information we cannot " +
-                "work around, so I am closing it for now:", ""
+                AUTO_CLOSE
+                  ? "Thanks for the report. It is missing information we " +
+                    "cannot work around, so I am closing it for now:"
+                  : "Thanks for the report. It is missing information that has " +
+                    "to be filled in before anyone can act on it:",
+                ""
               );
               for (const e of errors) lines.push(`- ${e}`);
               lines.push(
                 "",
-                "Please reopen this issue once the details are filled in, or " +
-                "file a new one — we will pick it up from there."
+                AUTO_CLOSE
+                  ? "Please reopen this issue once the details are filled in, " +
+                    "or file a new one — we will pick it up from there."
+                  : "Edit the issue to add them and this comment updates " +
+                    "itself. Until then it is unlikely to get attention."
               );
             } else if (warnings.length) {
               lines.push(
@@ -221,7 +235,9 @@ jobs:
               }
             }
 
-            if (errors.length && issue.state === "open") {
+            if (AUTO_CLOSE && errors.length && issue.state === "open") {
+              // Only drop needs-triage when the issue actually leaves the
+              // queue; a still-open invalid issue is still waiting on a human.
               await github.rest.issues.removeLabel({
                 owner, repo, issue_number: issue.number, name: "needs-triage",
               }).catch(() => {});
