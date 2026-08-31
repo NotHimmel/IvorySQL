@@ -36,23 +36,11 @@ body:
     attributes:
       label: IvorySQL version
       description: |
-        `SELECT version()`. If you built from source or the release is not listed, pick the closest entry and give the exact version or commit SHA under "Anything else we need to know?".
+        `SELECT version()`. If you are not on the latest release of the line you pick, please give the exact version or commit SHA under "Anything else we need to know?".
       options:
-        - master (built from source)
-        - IvorySQL 5.4
-        - IvorySQL 5.3
-        - IvorySQL 5.1
-        - IvorySQL 5.0
-        - IvorySQL 4.6
-        - IvorySQL 4.5
-        - IvorySQL 4.4
-        - IvorySQL 4.2
-        - IvorySQL 4.0
-        - IvorySQL 1.23
-        - IvorySQL 1.22
-        - IvorySQL 1.17
-        - IvorySQL 3.x or older
-        - Other / not sure
+        - master
+        - IvorySQL V5
+        - IvorySQL V1
     validations:
       required: true
 
