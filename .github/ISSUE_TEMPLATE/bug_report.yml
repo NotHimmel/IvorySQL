@@ -38,12 +38,14 @@ body:
     attributes:
       label: Server encoding
       description: >
-        `SHOW server_encoding;`. If it is not UTF8, please say which it is at
-        the top of the reproduction below — the automatic run needs it to
-        pick the right database.
+        `SHOW server_encoding;` — required for anything involving
+        multibyte characters.
       options:
         - UTF8
-        - Other
+        - GB18030
+        - SQL_ASCII
+        - EUC_CN
+        - Other / not sure
     validations:
       required: true
 
