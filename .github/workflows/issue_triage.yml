@@ -1,20 +1,18 @@
 name: issue-triage
 
-# Validate bug reports in two tiers:
+# Every new issue gets `needs-triage`, which a human removes once the issue
+# has been dispositioned: assigned, marked help-wanted, or closed. That makes
+# the untriaged queue a queryable fact rather than an impression.
 #
-#   errors    facts without which the report cannot be acted on at all.
-#             The issue is labelled `invalid`. Closing it is gated behind
-#             AUTO_CLOSE, which is off — see the comment in the script.
-#   warnings  things that look thin but may still be usable.
-#             The issue is labelled `needs-verification` and left open.
-#
-# Every issue also gets `needs-triage`, which a human removes once the issue
-# has been dispositioned: assigned, marked help-wanted, or closed.
+# Anything thin or missing gets `needs-verification` plus one comment saying
+# what. Deliberately a single level: this workflow never closes anything, so
+# splitting the findings into "fatal" and "suspect" would have described a
+# difference with no consequence.
 #
 # The form is guidance, not a gate. Its `validations: required` is
 # client-side, so `gh issue create`, the REST API and transferred issues all
-# bypass it. This workflow runs on `issues` regardless of how the issue was
-# created, and adjusts what it checks to what the body actually contains.
+# bypass it. This runs on `issues` regardless of how the issue was created,
+# and adjusts what it checks to what the body actually contains.
 
 on:
   issues:
@@ -42,19 +40,13 @@ jobs:
           FIELDS: ${{ steps.parse.outputs.jsonString }}
         with:
           script: |
-            // Closing an issue is the only irreversible thing this workflow
-            // can do, so it stays off until the error rules have been watched
-            // long enough to show they produce no false positives. The labels
-            // and the explanation work the same either way.
-            const AUTO_CLOSE = false;
-
             // Only jsonString is reliable; the action's per-field outputs
             // come back empty.
             const f = JSON.parse(process.env.FIELDS || "{}");
             const issue = context.payload.issue;
             const { owner, repo } = context.repo;
 
-            // The environment fields ship with pre-filled scaffolding — a
+            // The environment field ships with pre-filled scaffolding — a
             // <details> wrapper, a console fence, the command, and a
             // "paste output here" marker. Strip all of it, so a field the
             // reporter never touched reads as empty rather than as content.
@@ -73,206 +65,151 @@ jobs:
             const fromForm = Object.keys(f).length > 0;
             const claimsBug = issue.labels.some(l => l.name === "bug");
 
-            const errors = [];
-            const warnings = [];
+            const notes = [];
 
-            // One field carries three facts, pasted in one go: SELECT
-            // version(), SHOW ivorysql.compatible_mode, SHOW server_encoding.
-            const env = fromForm ? val("ivoryVersion") : "";
+            // ---- not filed through the form ----
+            if (!fromForm) {
+              if (claimsBug) {
+                notes.push(
+                  "This was filed outside the bug report form, so the facts we " +
+                  "normally rely on are missing — version, compatible mode and " +
+                  "a reproduction. Please add them here, or refile through " +
+                  `[the form](https://github.com/${owner}/${repo}/issues/new?template=bug_report.yml).`
+                );
+              }
+            } else {
+              // One field carries three facts, pasted in one go: SELECT
+              // version(), SHOW ivorysql.compatible_mode, SHOW server_encoding.
+              const env = val("ivoryVersion");
 
-            // ---- E1: no version we can trace to a tree ----
-            const hasVersion =
-              /\bIvorySQL\b/i.test(env) ||
-              /\b\d+\.\d+/.test(env) ||
-              /\b\d+devel\b/i.test(env) ||
-              /\b[0-9a-f]{7,40}\b/i.test(env);
-            const VAGUE = /\b(latest|newest|current|trunk|n\/?a)\b/i;
-            if (fromForm && (!hasVersion || (VAGUE.test(env) && !/\bIvorySQL\b/i.test(env)))) {
-              errors.push(
-                "**IvorySQL version and compatible mode** does not contain a " +
-                "version we can trace back to a tree. Please paste the output " +
-                "of `SELECT version()`, or give a commit SHA — otherwise there " +
-                "is no way to tell which code the report is about."
-              );
-            }
+              const hasVersion =
+                /\bIvorySQL\b/i.test(env) ||
+                /\b\d+\.\d+/.test(env) ||
+                /\b\d+devel\b/i.test(env) ||
+                /\b[0-9a-f]{7,40}\b/i.test(env);
+              const VAGUE = /\b(latest|newest|current|trunk|n\/?a)\b/i;
+              if (!hasVersion || (VAGUE.test(env) && !/\bIvorySQL\b/i.test(env))) {
+                notes.push(
+                  "**IvorySQL version and compatible mode** has no version we " +
+                  "can trace back to a tree. Please paste the output of " +
+                  "`SELECT version()`, or give a commit SHA — otherwise there " +
+                  "is no way to tell which code the report is about."
+                );
+              }
 
-            // ---- E2: no compatible mode ----
-            if (fromForm && !/\b(oracle|pg)\b/i.test(env)) {
-              errors.push(
-                "**IvorySQL version and compatible mode** does not say which " +
-                "mode this happens in. Behaviour differs substantially " +
-                "between `oracle` and `pg` — down to whether `''` is NULL and " +
-                "whether `DUAL` exists — so without it the report cannot be " +
-                "reproduced. `SHOW ivorysql.compatible_mode` gives it."
-              );
-            }
+              if (!/\b(oracle|pg)\b/i.test(env)) {
+                notes.push(
+                  "**IvorySQL version and compatible mode** does not say which " +
+                  "mode this happens in. Behaviour differs substantially " +
+                  "between `oracle` and `pg` — down to whether `''` is NULL and " +
+                  "whether `DUAL` exists — so without it the report cannot be " +
+                  "reproduced. `SHOW ivorysql.compatible_mode` gives it."
+                );
+              }
 
-            // ---- W1: no server encoding ----
-            const ENCODINGS = /\b(UTF8|SQL_ASCII|GB18030|EUC_CN|EUC_JP|EUC_KR|LATIN\d|WIN\d+)\b/i;
-            if (fromForm && !errors.length && !ENCODINGS.test(env)) {
-              warnings.push(
-                "The version block does not include `SHOW server_encoding`. " +
-                "Anything touching multibyte characters behaves differently " +
-                "per encoding, so it is worth having even when it looks " +
-                "unrelated."
-              );
-            }
+              const ENCODINGS = /\b(UTF8|SQL_ASCII|GB18030|EUC_CN|EUC_JP|EUC_KR|LATIN\d|WIN\d+)\b/i;
+              if (!ENCODINGS.test(env)) {
+                notes.push(
+                  "The version block does not include `SHOW server_encoding`. " +
+                  "Anything touching multibyte characters behaves differently " +
+                  "per encoding, so it is worth having even when it looks " +
+                  "unrelated."
+                );
+              }
 
-            // ---- W2: reproduction is very thin ----
-            const repro = fromForm ? val("repro") : "";
-            if (fromForm && repro.replace(/\s/g, "").length < 40) {
-              warnings.push(
-                "**How can we reproduce it** is very short. Whatever it takes " +
-                "— SQL, shell commands, a configuration, a sequence of " +
-                "sessions — is worth spelling out. A reproduction someone can " +
-                "follow is usually what decides whether a report gets picked up."
-              );
-            }
+              if (val("repro").replace(/\s/g, "").length < 40) {
+                notes.push(
+                  "**How can we reproduce it** is very short. Whatever it " +
+                  "takes — SQL, shell commands, a configuration, a sequence of " +
+                  "sessions — is worth spelling out. A reproduction someone " +
+                  "can follow is usually what decides whether a report gets " +
+                  "picked up."
+                );
+              }
 
-            // ---- W3: nothing usable under What happened? ----
-            // Deliberately does not require output that looks like psql's:
-            // crashes, build failures and hangs are real reports that produce
-            // no row count. Only the two cases that cost a round trip.
-            const problem = fromForm ? val("problem") : "";
-            const textOnly = problem
-              .replace(/!\[[^\]]*\]\([^)]*\)|<img[^>]*>/g, "")
-              .replace(/\s/g, "");
-            if (fromForm && /(!\[|<img)/.test(problem) && textOnly.length < 20) {
-              warnings.push(
-                "**What happened?** is a screenshot with little text. Please " +
-                "paste the output as text as well, so it can be searched, " +
-                "quoted, and copied into a test."
-              );
-            } else if (fromForm && textOnly.length < 20) {
-              warnings.push(
-                "**What happened?** is very short. Real output pasted as text " +
-                "is the single most useful thing a report can carry."
-              );
-            }
+              // Deliberately does not require output that looks like psql's:
+              // crashes, build failures and hangs are real reports that
+              // produce no row count. Only the two cases that cost a round
+              // trip.
+              const problem = val("problem");
+              const textOnly = problem
+                .replace(/!\[[^\]]*\]\([^)]*\)|<img[^>]*>/g, "")
+                .replace(/\s/g, "");
+              if (/(!\[|<img)/.test(problem) && textOnly.length < 20) {
+                notes.push(
+                  "**What happened?** is a screenshot with little text. Please " +
+                  "paste the output as text as well, so it can be searched, " +
+                  "quoted, and copied into a test."
+                );
+              } else if (textOnly.length < 20) {
+                notes.push(
+                  "**What happened?** is very short. Real output pasted as " +
+                  "text is the single most useful thing a report can carry."
+                );
+              }
 
-            // ---- W4: current master not confirmed ----
-            if (fromForm && !/\[x\]\s*I confirmed the problem/i.test(issue.body || "")) {
-              warnings.push(
-                "The report does not confirm the problem still happens on " +
-                "current `master`. Several recent reports turned out to " +
-                "describe code that had already been fixed."
-              );
-            }
-
-            // ---- W5: labelled a bug but not filed through the form ----
-            if (!fromForm && claimsBug) {
-              warnings.push(
-                "This was filed outside the bug report form, so the facts we " +
-                "normally rely on are missing — version, compatible mode and " +
-                "a reproduction. Please add them here, or refile through " +
-                `[the form](https://github.com/${owner}/${repo}/issues/new?template=bug_report.yml).`
-              );
+              if (!/\[x\]\s*I confirmed the problem/i.test(issue.body || "")) {
+                notes.push(
+                  "The report does not confirm the problem still happens on " +
+                  "current `master`. Several recent reports turned out to " +
+                  "describe code that had already been fixed."
+                );
+              }
             }
 
             // ======================= act =======================
             const MARK = "<!-- issue-triage -->";
-            const add = ["needs-triage"];
-            if (warnings.length) add.push("needs-verification");
-            if (errors.length)   add.push("invalid");
+            const labels = ["needs-triage"];
+            if (notes.length) labels.push("needs-verification");
 
             await github.rest.issues.addLabels({
-              owner, repo, issue_number: issue.number, labels: add,
+              owner, repo, issue_number: issue.number, labels,
             });
 
-            // The reporter may have edited the issue to fix things. Clear both
-            // problem labels — leaving `invalid` on a report that is now
-            // complete is worse than never having applied it.
-            if (!warnings.length && !errors.length) {
-              for (const stale of ["needs-verification", "invalid"]) {
-                if (issue.labels.some(l => l.name === stale)) {
-                  await github.rest.issues.removeLabel({
-                    owner, repo, issue_number: issue.number, name: stale,
-                  }).catch(() => {});
-                }
-              }
-            }
-
-            const lines = [MARK];
-            if (errors.length) {
-              lines.push(
-                AUTO_CLOSE
-                  ? "Thanks for the report. It is missing information we " +
-                    "cannot work around, so I am closing it for now:"
-                  : "Thanks for the report. It is missing information that " +
-                    "has to be filled in before anyone can act on it:",
-                ""
-              );
-              for (const e of errors) lines.push(`- ${e}`);
-              lines.push(
-                "",
-                AUTO_CLOSE
-                  ? "Please reopen this issue once the details are filled in, " +
-                    "or file a new one — we will pick it up from there."
-                  : "Edit the issue to add them and this comment updates itself."
-              );
-            } else if (warnings.length) {
-              lines.push(
-                "Thanks for the report. A few things are worth confirming " +
-                "before someone digs in:", ""
-              );
-              for (const w of warnings) lines.push(`- ${w}`);
-              lines.push(
-                "",
-                "Edit the issue to add them and this comment updates itself."
-              );
+            // The reporter may have edited the issue to fix things.
+            if (!notes.length &&
+                issue.labels.some(l => l.name === "needs-verification")) {
+              await github.rest.issues.removeLabel({
+                owner, repo, issue_number: issue.number,
+                name: "needs-verification",
+              }).catch(() => {});
             }
 
             // Keep exactly one bot comment per issue; edit it on re-runs. When
-            // nothing is left to report the earlier comment must be rewritten
+            // nothing is left to say the earlier comment must be rewritten
             // rather than left behind, or it keeps asking for details that
             // have since been supplied.
             const prior = (await github.paginate(github.rest.issues.listComments, {
               owner, repo, issue_number: issue.number, per_page: 100,
             })).find(c => c.user.type === "Bot" && (c.body || "").includes(MARK));
 
-            if (lines.length > 1) {
-              const body = lines.join("\n");
-              if (prior) {
-                if (prior.body !== body) {
-                  await github.rest.issues.updateComment({
-                    owner, repo, comment_id: prior.id, body });
-                }
-              } else {
-                await github.rest.issues.createComment({
-                  owner, repo, issue_number: issue.number, body });
-              }
-            } else if (prior) {
-              const body = MARK + "\nThe details are all filled in now — " +
-                           "thanks. Nothing further needed from my side.";
+            const body = notes.length
+              ? [
+                  MARK,
+                  "Thanks for the report. A few things are worth filling in " +
+                  "before someone digs in:",
+                  "",
+                  ...notes.map(n => `- ${n}`),
+                  "",
+                  "Edit the issue to add them and this comment updates itself.",
+                ].join("\n")
+              : MARK + "\nThe details are all filled in — thanks. Nothing " +
+                       "further needed from my side.";
+
+            if (prior) {
               if (prior.body !== body) {
                 await github.rest.issues.updateComment({
                   owner, repo, comment_id: prior.id, body });
               }
-            }
-
-            if (AUTO_CLOSE && errors.length && issue.state === "open") {
-              // Only drop needs-triage when the issue actually leaves the
-              // queue; a still-open invalid issue is still waiting on a human.
-              await github.rest.issues.removeLabel({
-                owner, repo, issue_number: issue.number, name: "needs-triage",
-              }).catch(() => {});
-              await github.rest.issues.update({
-                owner, repo, issue_number: issue.number,
-                state: "closed", state_reason: "not_planned",
-              });
+            } else if (notes.length) {
+              // Nothing to say and nothing said before: stay quiet.
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: issue.number, body });
             }
 
             const s = ["## Issue triage report", `- Issue #${issue.number}`,
-                       `- Filed through the form: ${fromForm}`, ""];
-            if (warnings.length) {
-              s.push("### Warnings");
-              for (const w of warnings) s.push(`- ${w}`);
-              s.push("");
-            }
-            if (errors.length) {
-              s.push("### Errors");
-              for (const e of errors) s.push(`- ${e}`);
-            } else {
-              s.push("### Result", "- No blocking problems found.");
-            }
+                       `- Filed through the form: ${fromForm}`,
+                       `- Notes: ${notes.length}`, ""];
+            for (const n of notes) s.push(`- ${n}`);
+            if (!notes.length) s.push("- Nothing to report.");
             await core.summary.addRaw(s.join("\n")).write();
