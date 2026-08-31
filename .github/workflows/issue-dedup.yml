@@ -1,0 +1,70 @@
+name: issue-dedup
+
+# 按代码标识符检索可能相关的 issue，贴出来供人判断。
+# 不打标签、不自动关闭 —— 相似不等于重复。
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: read
+
+jobs:
+  suggest:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const { owner, repo } = context.repo;
+            const text = `${issue.title}\n${issue.body || ""}`;
+
+            const STOP = new Set([
+              "select","insert","update","delete","create","table","from","where",
+              "error","issue","version","result","expected","current","behavior",
+              "postgres","postgresql","ivorysql","oracle","test","value","type",
+              "report","should","which","because","between","string","parameter",
+              "function","default","output","github","master","commit","reproduce",
+            ]);
+
+            const tokens = [...new Set(
+              (text.match(/[A-Za-z_][A-Za-z0-9_]{4,}/g) || [])
+                .map(t => t.toLowerCase())
+                .filter(t => !STOP.has(t))
+            )];
+
+            // 含下划线的优先 —— 更可能是源码标识符而非普通英文词
+            tokens.sort((a, b) =>
+              (b.includes("_") ? 1 : 0) - (a.includes("_") ? 1 : 0) || b.length - a.length
+            );
+            const keys = tokens.slice(0, 5);
+            console.log("keys:", keys);
+            if (!keys.length) return;
+
+            const q = `repo:${owner}/${repo} is:issue -${issue.number} ${keys.join(" OR ")}`;
+            const { data } = await github.rest.search.issuesAndPullRequests({
+              q, sort: "updated", per_page: 8,
+            });
+
+            const hits = data.items.filter(i => i.number !== issue.number).slice(0, 3);
+            console.log("hits:", hits.map(h => h.number));
+            if (!hits.length) return;
+
+            await github.rest.issues.createComment({
+              owner, repo, issue_number: issue.number,
+              body: [
+                "<!-- issue-dedup -->",
+                "按 `" + keys.join("`、`") + "` 检索到几个可能相关的 issue，供参考：",
+                "",
+                ...hits.map(i =>
+                  `- #${i.number} ${i.title} — ${i.state}`
+                ),
+                "",
+                "如果其中某一条已经涵盖了本问题，欢迎在那边继续讨论。" +
+                "如果都不相关，忽略这条即可。",
+              ].join("\n"),
+            });

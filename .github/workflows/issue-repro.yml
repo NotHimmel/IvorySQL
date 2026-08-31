@@ -1,0 +1,315 @@
+name: issue-repro
+
+# 对 issue 里的「复现步骤」SQL 在当前 master 上实际执行，把输出贴回 issue。
+# 只贴事实，不做任何判断。
+#
+# 安全模型的核心是两条，其余都是纵深：
+#   1. 执行 SQL 的 job 的 GITHUB_TOKEN 权限为空（permissions: {}），
+#      且不注入任何 secret —— 那个 job 里没有可窃取的东西。
+#   2. SQL 以非 superuser 角色执行 —— 一次性关掉 COPY FROM PROGRAM、
+#      pg_read_file、lo_export、创建 plpython3u 这四类提权路径。
+#
+# 发评论由独立的 report job 负责，它有 issues: write 但不执行任何用户输入。
+
+on:
+  issues:
+    types: [opened, edited]
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: issue-repro-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------
+  # 决定要不要跑，以及跑什么
+  # ---------------------------------------------------------------
+  plan:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: read
+    outputs:
+      run: ${{ steps.decide.outputs.run }}
+      oracle: ${{ steps.decide.outputs.oracle }}
+      sql: ${{ steps.parse.outputs.issueparser_repro }}
+      mode: ${{ steps.parse.outputs.issueparser_compatible_mode }}
+      encoding: ${{ steps.parse.outputs.issueparser_server_encoding }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: stefanbuck/github-issue-parser@v3
+        id: parse
+        with:
+          issue-body: ${{ github.event.issue.body }}
+          template-path: .github/ISSUE_TEMPLATE/bug_report.yml
+
+      - id: decide
+        uses: actions/github-script@v7
+        env:
+          SQL: ${{ steps.parse.outputs.issueparser_repro }}
+        with:
+          script: |
+            const issue = context.payload.issue;
+            const sql = (process.env.SQL || "").trim();
+            const isComment = context.eventName === "issue_comment";
+            const cmd = isComment
+              ? (context.payload.comment.body || "").trim().toLowerCase()
+              : "";
+
+            let run = false, oracle = false;
+
+            if (isComment) {
+              // 手动触发。Oracle 那一侧很重（镜像数 GB，首次启动数分钟），
+              // 所以只在显式要求时才跑。
+              if (cmd === "/repro") run = true;
+              if (cmd === "/repro oracle") { run = true; oracle = true; }
+            } else {
+              // 自动触发：只对 bug 且通过硬失败校验的 issue
+              const labels = issue.labels.map(l => l.name);
+              run = labels.includes("bug") && !labels.includes("invalid");
+            }
+
+            // SQL 明显残缺时不跑 —— 跑一段跑不通的东西只会产生噪音评论
+            if (sql.length < 20 || !sql.includes(";")) {
+              console.log("repro SQL missing or too short; skipping.");
+              run = false;
+            }
+
+            core.setOutput("run", String(run));
+            core.setOutput("oracle", String(oracle));
+
+  # ---------------------------------------------------------------
+  # 执行。这个 job 没有任何凭据。
+  # ---------------------------------------------------------------
+  run:
+    needs: plan
+    if: needs.plan.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions: {}          # ← GITHUB_TOKEN 零权限
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bison flex libreadline-dev \
+                libicu-dev zlib1g-dev libxml2-dev libxslt-dev libssl-dev
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ${{ runner.os }}-repro
+          restore-keys: ${{ runner.os }}-repro
+          max-size: 600M
+          save: ${{ github.event_name == 'push' }}
+
+      - name: build
+        env:
+          CC: ccache gcc
+        run: |
+          ./configure --prefix="$PWD/inst" --with-icu --with-libxml \
+                      --with-libxslt --with-openssl --enable-rpath
+          make -j"$(nproc)" && make install
+          make -C contrib/ivorysql_ora install
+
+      # 用户 SQL 通过 env 传入并由 node 写盘，绝不经过 shell 展开。
+      - name: materialise repro SQL
+        uses: actions/github-script@v7
+        env:
+          REPRO_SQL: ${{ needs.plan.outputs.sql }}
+        with:
+          script: |
+            const fs = require("fs");
+            fs.mkdirSync("repro", { recursive: true });
+            fs.writeFileSync("repro/user.sql", process.env.REPRO_SQL || "");
+
+      - name: decide the run matrix
+        uses: actions/github-script@v7
+        env:
+          MODE: ${{ needs.plan.outputs.mode }}
+          ENCODING: ${{ needs.plan.outputs.encoding }}
+          REPRO_SQL: ${{ needs.plan.outputs.sql }}
+        with:
+          script: |
+            const fs = require("fs");
+            const sql = process.env.REPRO_SQL || "";
+            const declaredEnc = (process.env.ENCODING || "").trim();
+            const declaredMode = (process.env.MODE || "").trim();
+
+            // 兼容模式
+            const modes =
+              declaredMode.includes("两种") ? ["oracle", "pg"]
+              : declaredMode === "pg"       ? ["pg"]
+              : ["oracle"];                 // 默认与「与兼容模式无关」都按 oracle 跑
+
+            // 编码：声明值 + 含非 ASCII 时补跑 UTF8 / SQL_ASCII 以暴露编码依赖
+            const KNOWN = ["UTF8", "GB18030", "SQL_ASCII", "EUC_CN"];
+            const encs = new Set();
+            if (KNOWN.includes(declaredEnc)) encs.add(declaredEnc);
+            else encs.add("UTF8");
+            if (/[^\x00-\x7F]/.test(sql)) { encs.add("UTF8"); encs.add("SQL_ASCII"); }
+
+            fs.writeFileSync("repro/encodings.txt", [...encs].join("\n") + "\n");
+            fs.writeFileSync("repro/matrix.json",
+              JSON.stringify([...encs].flatMap(e => modes.map(m => ({ enc: e, mode: m })))));
+
+      - name: init cluster
+        run: |
+          set -eu
+          export PATH="$PWD/inst/bin:$PATH"
+          export LD_LIBRARY_PATH="$PWD/inst/lib"
+          # 只监听 unix socket，不开 TCP
+          initdb -D "$PWD/pgdata" -U super --no-sync -A trust >/dev/null
+          mkdir -p /tmp/rs
+          pg_ctl -D "$PWD/pgdata" -l "$PWD/pg.log" \
+                 -o "-c listen_addresses='' -k /tmp/rs -p 55999" start
+          sleep 2
+
+      - name: create databases and unprivileged role
+        run: |
+          set -eu
+          export PATH="$PWD/inst/bin:$PATH"
+          export LD_LIBRARY_PATH="$PWD/inst/lib"
+          PSQL="psql -h /tmp/rs -p 55999 -U super -v ON_ERROR_STOP=1 -q"
+
+          $PSQL -d postgres <<'SQL'
+          CREATE ROLE repro LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE
+                            NOREPLICATION NOBYPASSRLS;
+          ALTER ROLE repro SET statement_timeout = '30s';
+          ALTER ROLE repro SET lock_timeout = '5s';
+          ALTER ROLE repro SET idle_in_transaction_session_timeout = '30s';
+          ALTER ROLE repro SET temp_file_limit = '256MB';
+          ALTER ROLE repro SET search_path = repro, public;
+          SQL
+
+          for enc in $(cat repro/encodings.txt); do
+            createdb -h /tmp/rs -p 55999 -U super \
+                     --template=template0 --locale=C --encoding="$enc" "db_$enc"
+            $PSQL -d "db_$enc" <<'SQL'
+          -- 报告人自己的 schema；public 不给写
+          REVOKE ALL ON SCHEMA public FROM PUBLIC;
+          CREATE SCHEMA repro AUTHORIZATION repro;
+          SQL
+          done
+
+      - name: execute
+        run: |
+          set -eu
+          export PATH="$PWD/inst/bin:$PATH"
+          export LD_LIBRARY_PATH="$PWD/inst/lib"
+          echo "sha=$(git rev-parse HEAD)" > repro/meta.txt
+
+          python3 - <<'PY'
+          import json, subprocess, os
+          cells = json.load(open("repro/matrix.json"))
+          user = open("repro/user.sql").read()
+          out = []
+          for c in cells:
+              script = f"SET ivorysql.compatible_mode = {c['mode']};\n" + user
+              open("repro/cell.sql", "w").write(script)
+              p = subprocess.run(
+                  ["psql", "-h", "/tmp/rs", "-p", "55999", "-U", "repro",
+                   "-d", f"db_{c['enc']}", "-X", "-a", "-v", "ON_ERROR_STOP=0",
+                   "-f", "repro/cell.sql"],
+                  capture_output=True, text=True, timeout=180)
+              body = (p.stdout + p.stderr)[:4000]
+              out.append({"enc": c["enc"], "mode": c["mode"], "out": body})
+          json.dump(out, open("repro/result.json", "w"))
+          PY
+
+      - name: stop cluster
+        if: always()
+        run: |
+          export PATH="$PWD/inst/bin:$PATH"
+          export LD_LIBRARY_PATH="$PWD/inst/lib"
+          pg_ctl -D "$PWD/pgdata" stop -m immediate || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: repro-result
+          path: |
+            repro/result.json
+            repro/meta.txt
+          retention-days: 3
+
+  # ---------------------------------------------------------------
+  # 发评论。有权限，但不碰用户输入以外的任何执行。
+  # ---------------------------------------------------------------
+  report:
+    needs: [plan, run]
+    if: always() && needs.plan.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: repro-result
+          path: repro
+        continue-on-error: true
+
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require("fs");
+            const MARK = "<!-- issue-repro -->";
+            const { owner, repo } = context.repo;
+            const issue_number = context.payload.issue.number;
+
+            let cells = [], sha = "unknown";
+            try {
+              cells = JSON.parse(fs.readFileSync("repro/result.json", "utf8"));
+              sha = (fs.readFileSync("repro/meta.txt", "utf8")
+                       .match(/sha=(\w+)/) || [])[1] || sha;
+            } catch (e) {
+              console.log("no result artifact:", e.message);
+            }
+
+            const lines = [MARK];
+            if (!cells.length) {
+              lines.push(
+                "自动复现未能完成 —— 构建或执行阶段失败。",
+                "详见 workflow 运行日志；这不代表报告有问题。"
+              );
+            } else {
+              lines.push(
+                `在 \`master\` @ \`${sha.slice(0, 12)}\` 上执行了「复现步骤」中的 SQL。`,
+                ""
+              );
+              for (const c of cells) {
+                lines.push(
+                  `<details><summary><code>compatible_mode=${c.mode}` +
+                  ` · server_encoding=${c.enc}</code></summary>`,
+                  "", "```", c.out.trimEnd(), "```", "</details>", ""
+                );
+              }
+              lines.push(
+                "以非 superuser 角色执行，`statement_timeout=30s`，无网络访问。",
+                "本条为自动执行结果，不含任何判断 —— 若与报告中的「实际结果」不一致，",
+                "请对照上方标注的版本、编码与兼容模式。"
+              );
+            }
+
+            let body = lines.join("\n");
+            if (body.length > 60000) body = body.slice(0, 60000) + "\n\n…（输出已截断）";
+
+            const prior = (await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number, per_page: 100,
+            })).find(c => c.user.type === "Bot" && (c.body || "").includes(MARK));
+
+            if (prior) {
+              if (prior.body !== body) {
+                await github.rest.issues.updateComment({
+                  owner, repo, comment_id: prior.id, body });
+              }
+            } else {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number, body });
+            }

@@ -1,0 +1,188 @@
+name: issue-triage
+
+on:
+  issues:
+    types: [opened, edited]
+
+permissions:
+  issues: write
+
+jobs:
+  triage:
+    if: contains(github.event.issue.labels.*.name, 'bug')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: stefanbuck/github-issue-parser@v3
+        id: parse
+        with:
+          issue-body: ${{ github.event.issue.body }}
+          template-path: .github/ISSUE_TEMPLATE/bug_report.yml
+
+      # 首轮测试用：把解析结果原样打进日志，确认字段名与取值形态
+      - name: dump parsed fields
+        env:
+          FIELDS: ${{ steps.parse.outputs.jsonString }}
+        run: |
+          echo "----- parser jsonString -----"
+          printf '%s\n' "$FIELDS" | python3 -m json.tool || printf '%s\n' "$FIELDS"
+          echo "-----------------------------"
+
+      - uses: actions/github-script@v7
+        env:
+          FIELDS: ${{ steps.parse.outputs.jsonString }}
+        with:
+          script: |
+            const f = JSON.parse(process.env.FIELDS || "{}");
+            const issue = context.payload.issue;
+            const { owner, repo } = context.repo;
+
+            const NO_RESPONSE = /^_no response_$/i;
+            const val = k => {
+              const v = (f[k] || "").trim();
+              return NO_RESPONSE.test(v) ? "" : v;
+            };
+
+            const errors = [];
+            const warnings = [];
+
+            // ---- H1 版本字段不可回溯 ----
+            const version = val("version");
+            const vnorm = version.toLowerCase().replace(/[\s`'"]/g, "");
+            const BANNED = ["latest", "newest", "master", "head", "current",
+                            "trunk", "最新", "最新版", "n/a", "na", "-"];
+            if (!vnorm || BANNED.some(b => vnorm === b || vnorm.includes(b))) {
+              errors.push(
+                "`IvorySQL 版本` 填写为无法回溯的值。请提供 `SELECT version();` " +
+                "的输出或一个 commit SHA —— 否则无法判断这份报告对应哪一棵代码树。"
+              );
+            }
+
+            // ---- H2 兼容模式未填 ----
+            if (!val("compatible_mode")) {
+              errors.push(
+                "`兼容模式` 未填写。IvorySQL 在 oracle 与 pg 模式下行为差异很大，" +
+                "该字段缺失时报告无法被复现。"
+              );
+            }
+
+            // ---- S3 版本格式无法识别 ----
+            if (!errors.length &&
+                !/^\d+(\.\d+)*/.test(version) &&
+                !/\d+devel/i.test(version) &&
+                !/\b[0-9a-f]{7,40}\b/i.test(version)) {
+              warnings.push("`IvorySQL 版本` 的格式无法识别为版本号或 commit SHA。");
+            }
+
+            // ---- S1 复现 SQL 疑似不完整 ----
+            const sql = val("repro");
+            const KW = /\b(select|create|insert|update|delete|alter|call|do|begin)\b/i;
+            const p = [];
+            if (sql.replace(/\s/g, "").length < 20) p.push("内容过短");
+            if (!sql.includes(";")) p.push("没有语句终止符 `;`");
+            if (!KW.test(sql)) p.push("不含任何 SQL 语句关键字");
+
+            const created = new Set(
+              [...sql.matchAll(/\bcreate\s+(?:global\s+|local\s+)?(?:temp\w*\s+)?(?:table|view|sequence|type|index)\s+(?:if\s+not\s+exists\s+)?([\w."]+)/gi)]
+                .map(m => m[1].toLowerCase().replace(/"/g, ""))
+            );
+            const EXEMPT = /^(dual|pg_|sys\.|information_schema\.|generate_series)/;
+            const referenced = [...sql.matchAll(/\b(?:from|into|update|join)\s+([\w."]+)/gi)]
+              .map(m => m[1].toLowerCase().replace(/"/g, ""))
+              .filter(t => !EXEMPT.test(t));
+            const missing = [...new Set(referenced.filter(t => !created.has(t)))];
+            if (missing.length) {
+              p.push(`引用了未建立的对象：${missing.map(t => "`" + t + "`").join(", ")}`);
+            }
+            if (p.length) warnings.push(`\`复现步骤\` 疑似不完整（${p.join("；")}）。`);
+
+            // ---- S2 日志或输出格式异常 ----
+            const out = val("actual") + "\n" + val("logs");
+            const LOGSHAPE = /(ERROR:|WARNING:|DETAIL:|HINT:|LINE \d|\(\d+ rows?\)|^-{3,}|\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})/m;
+            const IMAGE_ONLY = /(!\[|<img)/.test(out) && !LOGSHAPE.test(out);
+            if (!LOGSHAPE.test(out)) {
+              warnings.push(
+                IMAGE_ONLY
+                  ? "`实际结果` 只有截图。请以文本形式粘贴 psql 输出，便于检索与复制。"
+                  : "`实际结果` / `相关日志` 不像 psql 或服务端日志的原始输出。"
+              );
+            }
+
+            // ---- S4 未确认当前 master ----
+            if (!/\[x\]\s*我已在当前/i.test(issue.body || "")) {
+              warnings.push(
+                "未确认问题在当前 `master` 上仍然存在。近期多个报告是针对已修复的代码提出的。"
+              );
+            }
+
+            // ================= 执行 =================
+            const MARK = "<!-- issue-triage -->";
+            const add = ["needs-triage"];
+            if (warnings.length) add.push("needs-verification");
+            if (errors.length)   add.push("invalid");
+
+            await github.rest.issues.addLabels({
+              owner, repo, issue_number: issue.number, labels: add,
+            });
+
+            if (!warnings.length && !errors.length &&
+                issue.labels.some(l => l.name === "needs-verification")) {
+              await github.rest.issues.removeLabel({
+                owner, repo, issue_number: issue.number, name: "needs-verification",
+              }).catch(() => {});
+            }
+
+            const lines = [MARK];
+            if (errors.length) {
+              lines.push("这份报告缺少无法绕过的信息，已先行关闭：", "");
+              for (const e of errors) lines.push(`- ${e}`);
+              lines.push("", "补齐后请重新打开或新建 issue，我们会继续跟进。感谢反馈。");
+            } else if (warnings.length) {
+              lines.push("已收到，并标记为 `needs-verification` —— 以下几点请确认：", "");
+              for (const w of warnings) lines.push(`- ${w}`);
+              lines.push("", "补充信息后本条会自动更新。");
+            }
+
+            if (lines.length > 1) {
+              const prior = (await github.paginate(github.rest.issues.listComments, {
+                owner, repo, issue_number: issue.number, per_page: 100,
+              })).find(c => c.user.type === "Bot" && (c.body || "").includes(MARK));
+
+              const body = lines.join("\n");
+              if (prior) {
+                if (prior.body !== body) {
+                  await github.rest.issues.updateComment({
+                    owner, repo, comment_id: prior.id, body });
+                }
+              } else {
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: issue.number, body });
+              }
+            }
+
+            if (errors.length && issue.state === "open") {
+              await github.rest.issues.removeLabel({
+                owner, repo, issue_number: issue.number, name: "needs-triage",
+              }).catch(() => {});
+              await github.rest.issues.update({
+                owner, repo, issue_number: issue.number,
+                state: "closed", state_reason: "not_planned",
+              });
+            }
+
+            const s = ["## Issue Triage Report", `- Issue #${issue.number}`, ""];
+            if (warnings.length) {
+              s.push("### Warnings");
+              for (const w of warnings) s.push(`- ${w}`);
+              s.push("");
+            }
+            if (errors.length) {
+              s.push("### Errors");
+              for (const e of errors) s.push(`- ${e}`);
+            } else {
+              s.push("### Result", "- 无硬失败。");
+            }
+            await core.summary.addRaw(s.join("\n")).write();
