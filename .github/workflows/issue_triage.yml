@@ -103,13 +103,20 @@ jobs:
               );
             }
 
-            // ---- W2: reproduction SQL looks incomplete ----
-            const sql = fromForm ? val("repro") : "";
+            // ---- W2: a SQL block is present but does not look runnable ----
+            // The reproduction field is free-form on purpose, so its prose is
+            // not checked. Only a ```sql block is, because that is what CI
+            // would try to execute.
+            const repro = fromForm ? val("repro") : "";
+            const sql = [...repro.matchAll(/```sql\s*\n([\s\S]*?)```/gi)]
+              .map(m => m[1]).join("\n").trim();
+            const hasSqlBlock = sql.length > 0;
             const KW = /\b(select|create|insert|update|delete|alter|call|do|begin)\b/i;
             const p = [];
-            if (sql.replace(/\s/g, "").length < 20) p.push("it is very short");
-            if (!sql.includes(";")) p.push("there is no statement terminator");
-            if (!KW.test(sql)) p.push("it contains no SQL statement keyword");
+            if (hasSqlBlock) {
+              if (!sql.includes(";")) p.push("there is no statement terminator");
+              if (!KW.test(sql)) p.push("it contains no SQL statement keyword");
+            }
 
             const created = new Set(
               [...sql.matchAll(/\bcreate\s+(?:global\s+|local\s+)?(?:temp\w*\s+)?(?:table|view|sequence|type|index)\s+(?:if\s+not\s+exists\s+)?([\w."]+)/gi)]
@@ -124,25 +131,41 @@ jobs:
               p.push("it references objects it never creates: " +
                      missing.map(t => "`" + t + "`").join(", "));
             }
-            if (fromForm && p.length) {
+            if (fromForm && hasSqlBlock && p.length) {
               warnings.push(
-                `**Steps to reproduce** looks incomplete — ${p.join("; ")}. ` +
-                "A script that can be pasted straight into psql saves a " +
-                "round trip."
+                "The `sql` block in **How can we reproduce it** does not look " +
+                `runnable — ${p.join("; ")}. CI runs that block against ` +
+                "`master` automatically, so a block that executes as-is saves " +
+                "a round trip."
+              );
+            }
+            if (fromForm && repro.replace(/\s/g, "").length < 40) {
+              warnings.push(
+                "**How can we reproduce it** is very short. Whatever it takes " +
+                "to reproduce — SQL, shell commands, a configuration, a " +
+                "sequence of sessions — is worth spelling out."
               );
             }
 
-            // ---- W3: output does not look like psql or server output ----
-            const out = fromForm ? val("actual") + "\n" + val("logs") : "";
-            const LOGSHAPE = /(ERROR:|WARNING:|DETAIL:|HINT:|LINE \d|\(\d+ rows?\)|^-{3,}|\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})/m;
-            const IMAGE_ONLY = /(!\[|<img)/.test(out) && !LOGSHAPE.test(out);
-            if (fromForm && !LOGSHAPE.test(out)) {
+            // ---- W3: nothing usable under "What happened?" ----
+            // Previously this demanded output that looked like psql's. That is
+            // wrong for a free-form field: plenty of real reports describe a
+            // crash, a build failure or a hang, none of which produce a row
+            // count. Only flag the two cases that genuinely cost a round trip.
+            const happened = fromForm ? val("what_happened") : "";
+            const imageOnly = /(!\[|<img)/.test(happened) &&
+                              happened.replace(/!\[[^\]]*\]\([^)]*\)|<img[^>]*>/g, "")
+                                      .replace(/\s/g, "").length < 20;
+            if (fromForm && imageOnly) {
               warnings.push(
-                IMAGE_ONLY
-                  ? "**Actual result** is a screenshot. Please paste the psql " +
-                    "output as text so it can be searched and copied."
-                  : "**Actual result** / **Relevant logs** do not look like raw " +
-                    "psql or server output."
+                "**What happened?** is a screenshot with little text. Please " +
+                "paste the output as text as well, so it can be searched, " +
+                "copied and quoted."
+              );
+            } else if (fromForm && happened.replace(/\s/g, "").length < 20) {
+              warnings.push(
+                "**What happened?** is very short. Real output pasted as text " +
+                "is the single most useful thing a report can carry."
               );
             }
 

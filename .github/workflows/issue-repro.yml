@@ -54,16 +54,21 @@ jobs:
           script: |
             // Only jsonString is reliable; the per-field outputs come back empty
             const f = JSON.parse(process.env.FIELDS || "{}");
-            const strip = s => (s || "")
-              .replace(/^\s*```[a-zA-Z]*\s*\n/, "")
-              .replace(/\n\s*```\s*$/, "")
-              .trim();
 
-            const sql = strip(f.repro);
+            // The reproduction field is free-form markdown, because plenty of
+            // problems do not reduce to a script — a build failure, a crash
+            // needing a particular configuration, something across sessions.
+            // Pull out any ```sql blocks and run those; if there are none,
+            // there is nothing to execute and this workflow stays quiet.
+            const sql = [...(f.repro || "")
+              .matchAll(/```sql\s*\n([\s\S]*?)```/gi)]
+              .map(m => m[1])
+              .join("\n")
+              .trim();
             core.setOutput("sql", sql);
             core.setOutput("mode", (f.compatible_mode || "").trim());
             core.setOutput("encoding", (f.server_encoding || "").trim());
-            console.log(`parsed: mode=${f.compatible_mode} enc=${f.server_encoding} sqlLen=${sql.length}`);
+            console.log(`parsed: mode=${f.compatible_mode} enc=${f.server_encoding} sqlBlockChars=${sql.length}`);
 
             const issue = context.payload.issue;
             const isComment = context.eventName === "issue_comment";
@@ -84,9 +89,10 @@ jobs:
               run = labels.includes("bug") && !labels.includes("invalid");
             }
 
-            // Skip obviously incomplete SQL; running it only produces noise
+            // No SQL block, or nothing runnable in it: not a failure, just
+            // nothing for this workflow to do.
             if (sql.length < 20 || !sql.includes(";")) {
-              console.log("repro SQL missing or too short; skipping.");
+              console.log("no runnable sql block in the reproduction; skipping.");
               run = false;
             }
 
@@ -154,7 +160,7 @@ jobs:
           REPRO_SQL: ${{ needs.plan.outputs.sql }}
         with:
           script: |
-            // The markdown fence was already stripped in plan
+            // Already extracted from the ```sql blocks in plan
             const fs = require("fs");
             fs.mkdirSync("repro", { recursive: true });
             fs.writeFileSync("repro/user.sql", process.env.REPRO_SQL || "");
@@ -322,7 +328,8 @@ jobs:
               );
             } else {
               lines.push(
-                "Ran the SQL from **Steps to reproduce** against `master` @ " +
+                "Ran the `sql` block from **How can we reproduce it** against " +
+                "`master` @ " +
                 `\`${sha.slice(0, 12)}\`.`,
                 ""
               );
