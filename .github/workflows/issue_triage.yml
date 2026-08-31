@@ -177,12 +177,17 @@ jobs:
               owner, repo, issue_number: issue.number, labels: add,
             });
 
-            // The reporter may have edited the issue to fix things
-            if (!warnings.length && !errors.length &&
-                issue.labels.some(l => l.name === "needs-verification")) {
-              await github.rest.issues.removeLabel({
-                owner, repo, issue_number: issue.number, name: "needs-verification",
-              }).catch(() => {});
+            // The reporter may have edited the issue to fix things. Clear
+            // both problem labels — leaving `invalid` on a report that is now
+            // complete is worse than never having applied it.
+            if (!warnings.length && !errors.length) {
+              for (const stale of ["needs-verification", "invalid"]) {
+                if (issue.labels.some(l => l.name === stale)) {
+                  await github.rest.issues.removeLabel({
+                    owner, repo, issue_number: issue.number, name: stale,
+                  }).catch(() => {});
+                }
+              }
             }
 
             const lines = [MARK];
@@ -217,12 +222,15 @@ jobs:
               );
             }
 
-            if (lines.length > 1) {
-              // Keep exactly one bot comment per issue; edit it on re-runs
-              const prior = (await github.paginate(github.rest.issues.listComments, {
-                owner, repo, issue_number: issue.number, per_page: 100,
-              })).find(c => c.user.type === "Bot" && (c.body || "").includes(MARK));
+            // Keep exactly one bot comment per issue; edit it on re-runs.
+            // When nothing is left to report, the earlier comment must be
+            // rewritten rather than left behind — otherwise it keeps asking
+            // for details that have since been supplied.
+            const prior = (await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number: issue.number, per_page: 100,
+            })).find(c => c.user.type === "Bot" && (c.body || "").includes(MARK));
 
+            if (lines.length > 1) {
               const body = lines.join("\n");
               if (prior) {
                 if (prior.body !== body) {
@@ -232,6 +240,13 @@ jobs:
               } else {
                 await github.rest.issues.createComment({
                   owner, repo, issue_number: issue.number, body });
+              }
+            } else if (prior) {
+              const body = MARK + "\nThe details are all filled in now — " +
+                           "thanks. Nothing further needed from my side.";
+              if (prior.body !== body) {
+                await github.rest.issues.updateComment({
+                  owner, repo, comment_id: prior.id, body });
               }
             }
 
