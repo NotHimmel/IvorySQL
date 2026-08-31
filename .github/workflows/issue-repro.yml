@@ -107,7 +107,6 @@ jobs:
           key: ${{ runner.os }}-repro
           restore-keys: ${{ runner.os }}-repro
           max-size: 600M
-          save: ${{ github.event_name == 'push' }}
 
       - name: build
         env:
