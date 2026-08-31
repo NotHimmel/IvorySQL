@@ -1,11 +1,11 @@
 name: issue-dedup
 
-# 按代码标识符找出可能相关的 issue，贴出来供人判断。
-# 不打标签、不自动关闭 —— 相似不等于重复。
+# Suggest possibly-related issues by the code identifiers they share.
+# Never labels and never closes: similar is not the same as duplicate.
 #
-# 用 REST 列表 + 本地匹配，不用 search API：
-# search 的索引有延迟（实测新建 issue 数十秒内查不到），
-# 而"几分钟内接连提交的重复"恰恰是最需要检出的那一类。
+# Reads the REST list and matches locally rather than using the search API,
+# whose index lags issue creation by tens of seconds — which is exactly the
+# window in which duplicates tend to arrive.
 
 on:
   issues:
@@ -23,7 +23,7 @@ jobs:
       - uses: actions/github-script@v7
         with:
           script: |
-            const CANDIDATES = 300;   // 参与比对的最近 issue 数
+            const CANDIDATES = 300;   // how many recent issues to compare against
             const SHOW = 3;
 
             const issue = context.payload.issue;
@@ -36,12 +36,12 @@ jobs:
               "report","should","which","because","between","string","parameter",
               "function","default","output","github","master","commit","reproduce",
               "steps","actual","additional","context","configuration","options",
-              // Issue Forms 自身的产物，会出现在每一份报告里
-              "response_","_no_response_","noresponse",
+              // Issue Form boilerplate, present in every submission
+              "response_","_no_response_","noresponse","encoding","compatible",
             ]);
 
-            // 十六进制串（commit SHA）不是标识符 —— 同一版本的报告会共享它，
-            // 那只说明报告人抄了同一个版本号，不说明问题相关
+            // A hex run is a commit SHA, not an identifier. Two reports sharing
+            // one only means they copied the same version string.
             const isHex = t => /^[0-9a-f]{7,}$/.test(t);
 
             const tokenize = (s) => new Set(
@@ -51,17 +51,16 @@ jobs:
             );
 
             const mine = tokenize(`${issue.title}\n${issue.body || ""}`);
-            if (!mine.size) { console.log("no tokens"); return; }
+            if (!mine.size) { console.log("no usable tokens"); return; }
 
-            // 读主库而非搜索索引，几秒前建的 issue 也能取到
             const all = (await github.paginate(github.rest.issues.listForRepo, {
               owner, repo, state: "all", sort: "updated", direction: "desc",
               per_page: 100,
             })).filter(i => !i.pull_request && i.number !== issue.number)
                .slice(0, CANDIDATES);
 
-            // 先算每个 token 出现在多少个 issue 里 —— 越常见的词权重越低，
-            // 免得 to_date 这类高频标识符把结果冲淡
+            // Weight rare identifiers higher, so a common one such as
+            // `to_date` does not drown out a distinctive one.
             const docs = all.map(i => ({
               issue: i, toks: tokenize(`${i.title}\n${i.body || ""}`),
             }));
@@ -75,11 +74,11 @@ jobs:
               const score = shared.reduce((s, t) => s + 1 / (1 + df.get(t)), 0);
               return { n: d.issue.number, title: d.issue.title,
                        state: d.issue.state, shared, score };
-            }).filter(x => x.shared.length >= 2)      // 单个词重合不足以说明问题
+            }).filter(x => x.shared.length >= 2)   // one shared word proves nothing
               .sort((a, b) => b.score - a.score)
               .slice(0, SHOW);
 
-            console.log("my tokens:", [...mine].slice(0, 15));
+            console.log("tokens:", [...mine].slice(0, 15));
             console.log("candidates:", all.length);
             console.log("scored:", scored.map(s =>
               `#${s.n} score=${s.score.toFixed(3)} shared=[${s.shared.join(",")}]`));
@@ -90,14 +89,15 @@ jobs:
               owner, repo, issue_number: issue.number,
               body: [
                 "<!-- issue-dedup -->",
-                "检索到几个可能相关的 issue，供参考：",
+                "These issues mention some of the same code, in case any of " +
+                "them already covers this:",
                 "",
                 ...scored.map(s =>
                   `- #${s.n} ${s.title} — ${s.state}\n` +
-                  `  共同标识符：\`${s.shared.slice(0, 5).join("`、`")}\``
+                  `  shared identifiers: \`${s.shared.slice(0, 5).join("`, `")}\``
                 ),
                 "",
-                "如果其中某一条已经涵盖了本问题，欢迎在那边继续讨论。" +
-                "如果都不相关，忽略这条即可。",
+                "If one of them does, please continue the discussion there. " +
+                "If none are related, ignore this comment.",
               ].join("\n"),
             });

@@ -1,15 +1,15 @@
 name: issue-repro
 
-# 对 issue 里的「复现步骤」SQL 在当前 master 上实际执行，把输出贴回 issue。
-# 只贴事实，不做任何判断。
+# Execute the reproduction SQL from an issue against current master and post
+# the real output back. Facts only; the workflow never draws a conclusion.
 #
-# 安全模型的核心是两条，其余都是纵深：
-#   1. 执行 SQL 的 job 的 GITHUB_TOKEN 权限为空（permissions: {}），
-#      且不注入任何 secret —— 那个 job 里没有可窃取的东西。
-#   2. SQL 以非 superuser 角色执行 —— 一次性关掉 COPY FROM PROGRAM、
-#      pg_read_file、lo_export、创建 plpython3u 这四类提权路径。
+# Two things carry the security model; everything else is defence in depth:
+#   1. The job that runs the SQL has an empty GITHUB_TOKEN scope
+#      (permissions: {}) and no secrets, so there is nothing there to steal.
+#   2. The SQL runs as a non-superuser role, which closes COPY FROM PROGRAM,
+#      pg_read_file, lo_export and untrusted PL creation in one move.
 #
-# 发评论由独立的 report job 负责，它有 issues: write 但不执行任何用户输入。
+# A separate report job holds issues: write and never executes user input.
 
 on:
   issues:
@@ -23,7 +23,7 @@ concurrency:
 
 jobs:
   # ---------------------------------------------------------------
-  # 决定要不要跑，以及跑什么
+  # Decide whether to run, and what to run
   # ---------------------------------------------------------------
   plan:
     runs-on: ubuntu-latest
@@ -52,7 +52,7 @@ jobs:
           FIELDS: ${{ steps.parse.outputs.jsonString }}
         with:
           script: |
-            // 只用 jsonString —— 该 action 的单字段输出名不可靠
+            // Only jsonString is reliable; the per-field outputs come back empty
             const f = JSON.parse(process.env.FIELDS || "{}");
             const strip = s => (s || "")
               .replace(/^\s*```[a-zA-Z]*\s*\n/, "")
@@ -74,17 +74,17 @@ jobs:
             let run = false, oracle = false;
 
             if (isComment) {
-              // 手动触发。Oracle 那一侧很重（镜像数 GB，首次启动数分钟），
-              // 所以只在显式要求时才跑。
+              // Manual trigger. The Oracle side is heavy (multi-GB image,
+              // minutes to first open), so it only runs when asked for.
               if (cmd === "/repro") run = true;
               if (cmd === "/repro oracle") { run = true; oracle = true; }
             } else {
-              // 自动触发：只对 bug 且通过硬失败校验的 issue
+              // Automatic: only for bug reports that passed hard validation
               const labels = issue.labels.map(l => l.name);
               run = labels.includes("bug") && !labels.includes("invalid");
             }
 
-            // SQL 明显残缺时不跑 —— 跑一段跑不通的东西只会产生噪音评论
+            // Skip obviously incomplete SQL; running it only produces noise
             if (sql.length < 20 || !sql.includes(";")) {
               console.log("repro SQL missing or too short; skipping.");
               run = false;
@@ -94,14 +94,14 @@ jobs:
             core.setOutput("oracle", String(oracle));
 
   # ---------------------------------------------------------------
-  # 执行。这个 job 没有任何凭据。
+  # Execute. This job holds no credentials.
   # ---------------------------------------------------------------
   run:
     needs: plan
     if: needs.plan.outputs.run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    permissions: {}          # ← GITHUB_TOKEN 零权限
+    permissions: {}          # GITHUB_TOKEN with no scopes at all
     steps:
       - uses: actions/checkout@v4
         with:
@@ -125,34 +125,36 @@ jobs:
         env:
           CC: ccache gcc
         run: |
-          # 显式 set -e：bash 的 `-e` 对 `a && b` 里非最后一个命令不生效，
-          # 写成 `make && make install` 会让构建失败被静默跳过。
+          # Explicit set -e: bash's -e does not fire for a non-final command
+          # in an && list, so `make && make install` would silently skip the
+          # install and still leave the step green.
           set -eux -o pipefail
           ./configure --prefix="$PWD/inst" --with-icu --with-libxml \
                       --with-libxslt --with-openssl --enable-rpath \
                       --with-uuid=e2fs --with-ossp-uuid
-          # IvorySQL 的 initdb 会建这几个扩展，缺任何一个 initdb 就 FATAL：
-          #   plpgsql, plisql        —— 在 src 里
-          #   gb18030_2022           —— contrib
-          #   ivorysql_ora           —— contrib，其 preload_ora_misc.sql
-          #                             又 CREATE EXTENSION "uuid-ossp"
-          # 所以只建 src 是不够的，但也不必建整个 contrib。
+          # IvorySQL's initdb creates these extensions and fails fatally if
+          # any is missing:
+          #   plpgsql, plisql   in src
+          #   gb18030_2022      contrib
+          #   ivorysql_ora      contrib; its preload_ora_misc.sql in turn
+          #                     does CREATE EXTENSION "uuid-ossp"
+          # So src alone is not enough, but all of contrib is not needed.
           make -j"$(nproc)" -C src
           make -C src install
           for m in gb18030_2022 uuid-ossp ivorysql_ora; do
             make -j"$(nproc)" -C "contrib/$m"
             make -C "contrib/$m" install
           done
-          test -x "$PWD/inst/bin/initdb"        # 装好了才继续
+          test -x "$PWD/inst/bin/initdb"        # fail loudly if install did not happen
 
-      # 用户 SQL 通过 env 传入并由 node 写盘，绝不经过 shell 展开。
+      # User SQL reaches disk through env and node, never through the shell.
       - name: materialise repro SQL
         uses: actions/github-script@v7
         env:
           REPRO_SQL: ${{ needs.plan.outputs.sql }}
         with:
           script: |
-            // 围栏已在 plan 里剥掉，这里原样落盘
+            // The markdown fence was already stripped in plan
             const fs = require("fs");
             fs.mkdirSync("repro", { recursive: true });
             fs.writeFileSync("repro/user.sql", process.env.REPRO_SQL || "");
@@ -170,13 +172,14 @@ jobs:
             const declaredEnc = (process.env.ENCODING || "").trim();
             const declaredMode = (process.env.MODE || "").trim();
 
-            // 兼容模式
+            // Compatible mode
             const modes =
-              declaredMode.includes("两种") ? ["oracle", "pg"]
+              /both modes/i.test(declaredMode) ? ["oracle", "pg"]
               : declaredMode === "pg"       ? ["pg"]
-              : ["oracle"];                 // 默认与「与兼容模式无关」都按 oracle 跑
+              : ["oracle"];                 // default, and for "unrelated to mode"
 
-            // 编码：声明值 + 含非 ASCII 时补跑 UTF8 / SQL_ASCII 以暴露编码依赖
+            // Encoding: the declared one, plus UTF8 and SQL_ASCII when the SQL
+            // contains non-ASCII, which is what exposes encoding-dependent claims
             const KNOWN = ["UTF8", "GB18030", "SQL_ASCII", "EUC_CN"];
             const encs = new Set();
             if (KNOWN.includes(declaredEnc)) encs.add(declaredEnc);
@@ -192,7 +195,7 @@ jobs:
           set -eu
           export PATH="$PWD/inst/bin:$PATH"
           export LD_LIBRARY_PATH="$PWD/inst/lib"
-          # 只监听 unix socket，不开 TCP
+          # Unix socket only; no TCP listener
           initdb -D "$PWD/pgdata" -U super --no-sync -A trust >/dev/null
           mkdir -p /tmp/rs
           pg_ctl -D "$PWD/pgdata" -l "$PWD/pg.log" \
@@ -220,7 +223,7 @@ jobs:
             createdb -h /tmp/rs -p 55999 -U super \
                      --template=template0 --locale=C --encoding="$enc" "db_$enc"
             $PSQL -d "db_$enc" <<'SQL'
-          -- 报告人自己的 schema；public 不给写
+          -- Give the role its own schema; public stays read-only
           REVOKE ALL ON SCHEMA public FROM PUBLIC;
           CREATE SCHEMA repro AUTHORIZATION repro;
           SQL
@@ -241,9 +244,11 @@ jobs:
           for c in cells:
               script = f"SET ivorysql.compatible_mode = {c['mode']};\n" + user
               open("repro/cell.sql", "w").write(script)
-              # 不要 text=True：被测代码本身就可能产出在服务端编码下非法的
-              # 字节（正是 varchar2(n byte) 截断类问题的症状），解码异常会
-              # 让复现器自己崩掉，而那恰恰是最该被记录下来的现象。
+              # Do not pass text=True. The code under test can legitimately
+              # emit bytes that are invalid in the server encoding — that is
+              # the very symptom of byte-wise truncation of a multibyte
+              # character — and a decode error would crash the runner on
+              # exactly the case it exists to surface.
               p = subprocess.run(
                   ["psql", "-h", "/tmp/rs", "-p", "55999", "-U", "repro",
                    "-d", f"db_{c['enc']}", "-X", "-a", "-v", "ON_ERROR_STOP=0",
@@ -276,7 +281,7 @@ jobs:
           retention-days: 3
 
   # ---------------------------------------------------------------
-  # 发评论。有权限，但不碰用户输入以外的任何执行。
+  # Post the comment. Holds permissions, executes nothing.
   # ---------------------------------------------------------------
   report:
     needs: [plan, run]
@@ -311,12 +316,14 @@ jobs:
             const lines = [MARK];
             if (!cells.length) {
               lines.push(
-                "自动复现未能完成 —— 构建或执行阶段失败。",
-                "详见 workflow 运行日志；这不代表报告有问题。"
+                "The automatic reproduction did not complete — the build or",
+                "execution step failed. See the workflow run log; this says",
+                "nothing about the report itself."
               );
             } else {
               lines.push(
-                `在 \`master\` @ \`${sha.slice(0, 12)}\` 上执行了「复现步骤」中的 SQL。`,
+                "Ran the SQL from **Steps to reproduce** against `master` @ " +
+                `\`${sha.slice(0, 12)}\`.`,
                 ""
               );
               for (const c of cells) {
@@ -328,22 +335,26 @@ jobs:
                 if (c.invalid_bytes) {
                   lines.push(
                     "",
-                    "⚠️ 这一格的输出含有在 UTF-8 下无法解码的字节，已用 � 替换。" +
-                    "服务端返回了在自身编码下非法的数据 —— 通常意味着某处按字节" +
-                    "截断了多字节字符。"
+                    "⚠️ This run produced bytes that do not decode as UTF-8; " +
+                    "they are shown as \uFFFD. The server returned data that is " +
+                    "invalid in its own encoding, which usually means a " +
+                    "multibyte character was truncated byte-wise."
                   );
                 }
                 lines.push("</details>", "");
               }
               lines.push(
-                "以非 superuser 角色执行，`statement_timeout=30s`，无网络访问。",
-                "本条为自动执行结果，不含任何判断 —— 若与报告中的「实际结果」不一致，",
-                "请对照上方标注的版本、编码与兼容模式。"
+                "Run as a non-superuser role with `statement_timeout=30s` and",
+                "no network access.",
+                "",
+                "This is an automatic run and draws no conclusion. If it",
+                "disagrees with **Actual result**, compare the version,",
+                "encoding and compatible mode noted above."
               );
             }
 
             let body = lines.join("\n");
-            if (body.length > 60000) body = body.slice(0, 60000) + "\n\n…（输出已截断）";
+            if (body.length > 60000) body = body.slice(0, 60000) + "\n\n…(output truncated)";
 
             const prior = (await github.paginate(github.rest.issues.listComments, {
               owner, repo, issue_number, per_page: 100,

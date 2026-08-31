@@ -1,74 +1,79 @@
 name: "🐛 Bug Report"
-description: 某个行为与预期不符
+description: Something does not behave as expected
 labels: ["bug", "needs-triage"]
 body:
   - type: markdown
     attributes:
       value: |
-        提交前请先在当前 `master` 上确认问题仍然存在，并搜索一下是否已有相同 issue。
+        Before filing, please confirm the problem still happens on current
+        `master`, and search for an existing issue covering it.
 
   - type: input
     id: version
     attributes:
-      label: IvorySQL 版本
+      label: IvorySQL version
       description: >
-        填写 `SELECT version();` 的输出，或一个 commit SHA。
-        不接受 `latest` / `最新` / `master` 这类无法回溯的值。
-      placeholder: "IvorySQL 4.5 ... 或 ba264e96bfe"
+        The output of `SELECT version();`, or a commit SHA.
+        Values such as `latest`, `newest` or `master` cannot be traced back
+        to a tree and are not accepted.
+      placeholder: "IvorySQL 4.5 ... or ba264e96bfe"
     validations:
       required: true
 
   - type: dropdown
     id: compatible_mode
     attributes:
-      label: 兼容模式
+      label: Compatible mode
       description: "`SHOW ivorysql.compatible_mode;`"
       options:
         - oracle
         - pg
-        - 两种模式下都出现
-        - 与兼容模式无关
+        - Happens in both modes
+        - Unrelated to compatible mode
     validations:
       required: true
 
   - type: dropdown
     id: server_encoding
     attributes:
-      label: 服务端编码
-      description: "`SHOW server_encoding;` — 多字节相关的问题必须提供"
+      label: Server encoding
+      description: >
+        `SHOW server_encoding;` — required for anything involving
+        multibyte characters.
       options:
         - UTF8
         - GB18030
         - SQL_ASCII
         - EUC_CN
-        - 其他 / 不确定
+        - Other / not sure
     validations:
       required: true
 
   - type: input
     id: os
     attributes:
-      label: 操作系统
-      placeholder: "uname -a 的输出"
+      label: Operating system
+      placeholder: "output of uname -a"
 
   - type: textarea
     id: configure
     attributes:
-      label: 构建配置
-      description: "`config.status --config` 或 meson setup 参数"
+      label: Build configuration
+      description: "`config.status --config`, or the meson setup arguments"
       render: shell
 
   - type: textarea
     id: repro
     attributes:
-      label: 复现步骤
+      label: Steps to reproduce
       description: >
-        一段可以直接粘进 psql 执行的完整 SQL，包含建表等前置语句。
-        请勿只描述「创建一张表然后查询」。
+        A complete SQL script that can be pasted straight into psql,
+        including any CREATE statements it depends on. Please do not
+        describe the steps in prose.
       render: sql
       placeholder: |
         CREATE TABLE t(a varchar2(10 byte));
-        INSERT INTO t VALUES ('中文');
+        INSERT INTO t VALUES ('...');
         SELECT lengthb(a) FROM t;
     validations:
       required: true
@@ -76,8 +81,8 @@ body:
   - type: textarea
     id: actual
     attributes:
-      label: 实际结果
-      description: 粘贴 psql 的真实输出，不要转述
+      label: Actual result
+      description: Paste the real psql output rather than summarising it
       render: text
     validations:
       required: true
@@ -85,23 +90,24 @@ body:
   - type: textarea
     id: expected
     attributes:
-      label: 预期结果
+      label: Expected result
       description: >
-        如果预期来自 Oracle，请附上在 Oracle 上执行的真实输出与版本。
+        If the expectation comes from Oracle, please include the real
+        Oracle output and the Oracle version it came from.
     validations:
       required: true
 
   - type: textarea
     id: logs
     attributes:
-      label: 相关日志
-      description: 服务端日志片段
+      label: Relevant logs
+      description: Server log excerpts
       render: text
 
   - type: checkboxes
     id: preflight
     attributes:
-      label: 提交前确认
+      label: Before submitting
       options:
-        - label: 我已在当前 `master` 上确认问题仍然存在
-        - label: 我已搜索过现有 issue，没有找到重复
+        - label: I confirmed the problem still happens on current `master`
+        - label: I searched existing issues and found no duplicate

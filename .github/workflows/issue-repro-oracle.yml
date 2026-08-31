@@ -1,13 +1,12 @@
 name: issue-repro-oracle
 
-# 把同一段复现 SQL 送到真 Oracle 上，回答「Oracle 到底怎么做」。
+# Run the same reproduction SQL against a real Oracle, so that "what does
+# Oracle actually do here" stops being a matter of recall:
+#   CREATE TABLE t(a LONG(2));  ->  ORA-03074
 #
-# 这把 "Oracle 的参照行为是什么" 从「需要判断」降级成「可执行」：
-#   CREATE TABLE t(a LONG(2));  →  ORA-03074
-# 不需要模型，也不需要有人恰好记得 Oracle 的规则。
-#
-# 自包含：不依赖仓库里的 compose 文件或脚本。
-# 只手动触发（/repro oracle）—— 镜像约 3 GB，首次启动数分钟。
+# Self-contained: does not depend on any compose file or script in the repo.
+# Manual trigger only (/repro oracle) — the image is roughly 3 GB and the
+# first open takes minutes.
 
 on:
   issue_comment:
@@ -50,7 +49,7 @@ jobs:
             const cmd = (context.payload.comment.body || "").trim().toLowerCase();
             if (cmd !== "/repro oracle") { core.setOutput("go", "false"); return; }
 
-            // 只有维护者能触发 —— Oracle 侧成本高
+            // Maintainers only; the Oracle side is expensive
             const { data: perm } =
               await github.rest.repos.getCollaboratorPermissionLevel({
                 ...context.repo, username: context.payload.comment.user.login,
@@ -71,7 +70,7 @@ jobs:
     if: needs.gate.outputs.go == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    permissions: {}          # 与 issue-repro 一致：执行侧无凭据
+    permissions: {}          # Same as issue-repro: the executing side holds no credentials
     steps:
       - name: materialise repro SQL
         uses: actions/github-script@v7
@@ -81,7 +80,7 @@ jobs:
           script: |
             const fs = require("fs");
             fs.mkdirSync("repro", { recursive: true });
-            // sqlplus 需要显式退出，否则 stdin 结束后会挂住
+            // sqlplus needs an explicit EXIT or it hangs after stdin closes
             const body = [
               "SET HEADING ON FEEDBACK ON PAGESIZE 50 LINESIZE 200",
               "WHENEVER SQLERROR CONTINUE",
@@ -99,7 +98,7 @@ jobs:
           set -eu
           docker run -d --name ora -e ORACLE_PWD="$ORA_PWD" \
                  --shm-size=1g "$ORA_IMAGE"
-          # 首次启动要解包并打开数据库
+          # The first start unpacks and opens the database
           for i in $(seq 1 120); do
             st=$(docker inspect -f '{{.State.Health.Status}}' ora 2>/dev/null || echo starting)
             [ "$st" = "healthy" ] && { echo "oracle healthy after ${i}0s"; exit 0; }
@@ -155,15 +154,17 @@ jobs:
             const body = out.trim()
               ? [
                   MARK,
-                  "在 Oracle Database Free 23c 上执行了同一段 SQL：",
+                  "Ran the same SQL against Oracle Database Free 23c:",
                   "", "```", out.slice(0, 20000).trimEnd(), "```", "",
-                  "本条为自动执行结果，不含判断。若 Oracle 的行为与报告中的",
-                  "「预期结果」不一致，说明这份报告的前提需要重新确认。",
+                  "This is an automatic run and draws no conclusion. If",
+                  "Oracle disagrees with **Expected result**, the premise of",
+                  "the report needs another look.",
                 ].join("\n")
               : [
                   MARK,
-                  "Oracle 侧执行未能完成 —— 容器启动或执行阶段失败，详见运行日志。",
-                  "这不代表报告有问题。",
+                  "The Oracle run did not complete — the container failed to",
+                  "start or the execution step failed. See the run log. This",
+                  "says nothing about the report itself.",
                 ].join("\n");
 
             const prior = (await github.paginate(github.rest.issues.listComments, {

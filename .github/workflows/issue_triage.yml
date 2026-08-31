@@ -1,5 +1,15 @@
 name: issue-triage
 
+# Validate bug reports filed through the Issue Form, in two tiers:
+#
+#   errors   fields that make the report impossible to act on at all.
+#            The issue is labelled `invalid` and closed as not planned.
+#   warnings fields that look suspect but may still be usable.
+#            The issue is labelled `needs-verification` and left open.
+#
+# Every issue also gets `needs-triage`, which a human removes once the
+# issue has been dispositioned (assigned, marked help-wanted, or closed).
+
 on:
   issues:
     types: [opened, edited]
@@ -22,20 +32,13 @@ jobs:
           issue-body: ${{ github.event.issue.body }}
           template-path: .github/ISSUE_TEMPLATE/bug_report.yml
 
-      # 首轮测试用：把解析结果原样打进日志，确认字段名与取值形态
-      - name: dump parsed fields
-        env:
-          FIELDS: ${{ steps.parse.outputs.jsonString }}
-        run: |
-          echo "----- parser jsonString -----"
-          printf '%s\n' "$FIELDS" | python3 -m json.tool || printf '%s\n' "$FIELDS"
-          echo "-----------------------------"
-
       - uses: actions/github-script@v7
         env:
           FIELDS: ${{ steps.parse.outputs.jsonString }}
         with:
           script: |
+            // Only jsonString is reliable; the action's per-field outputs
+            // come back empty.
             const f = JSON.parse(process.env.FIELDS || "{}");
             const issue = context.payload.issue;
             const { owner, repo } = context.repo;
@@ -49,41 +52,47 @@ jobs:
             const errors = [];
             const warnings = [];
 
-            // ---- H1 版本字段不可回溯 ----
+            // ---- E1: version cannot be traced to a tree ----
             const version = val("version");
             const vnorm = version.toLowerCase().replace(/[\s`'"]/g, "");
             const BANNED = ["latest", "newest", "master", "head", "current",
-                            "trunk", "最新", "最新版", "n/a", "na", "-"];
+                            "trunk", "n/a", "na", "-"];
             if (!vnorm || BANNED.some(b => vnorm === b || vnorm.includes(b))) {
               errors.push(
-                "`IvorySQL 版本` 填写为无法回溯的值。请提供 `SELECT version();` " +
-                "的输出或一个 commit SHA —— 否则无法判断这份报告对应哪一棵代码树。"
+                "**IvorySQL version** is not something we can trace back to a " +
+                "tree. Please give the output of `SELECT version();` or a " +
+                "commit SHA, otherwise there is no way to tell which code the " +
+                "report is about."
               );
             }
 
-            // ---- H2 兼容模式未填 ----
+            // ---- E2: compatible mode missing ----
             if (!val("compatible_mode")) {
               errors.push(
-                "`兼容模式` 未填写。IvorySQL 在 oracle 与 pg 模式下行为差异很大，" +
-                "该字段缺失时报告无法被复现。"
+                "**Compatible mode** is missing. Behaviour differs " +
+                "substantially between `oracle` and `pg` mode, so without it " +
+                "the report cannot be reproduced."
               );
             }
 
-            // ---- S3 版本格式无法识别 ----
+            // ---- W1: version format unrecognised ----
             if (!errors.length &&
                 !/^\d+(\.\d+)*/.test(version) &&
                 !/\d+devel/i.test(version) &&
                 !/\b[0-9a-f]{7,40}\b/i.test(version)) {
-              warnings.push("`IvorySQL 版本` 的格式无法识别为版本号或 commit SHA。");
+              warnings.push(
+                "**IvorySQL version** does not look like a version number or a " +
+                "commit SHA."
+              );
             }
 
-            // ---- S1 复现 SQL 疑似不完整 ----
+            // ---- W2: reproduction SQL looks incomplete ----
             const sql = val("repro");
             const KW = /\b(select|create|insert|update|delete|alter|call|do|begin)\b/i;
             const p = [];
-            if (sql.replace(/\s/g, "").length < 20) p.push("内容过短");
-            if (!sql.includes(";")) p.push("没有语句终止符 `;`");
-            if (!KW.test(sql)) p.push("不含任何 SQL 语句关键字");
+            if (sql.replace(/\s/g, "").length < 20) p.push("it is very short");
+            if (!sql.includes(";")) p.push("there is no statement terminator");
+            if (!KW.test(sql)) p.push("it contains no SQL statement keyword");
 
             const created = new Set(
               [...sql.matchAll(/\bcreate\s+(?:global\s+|local\s+)?(?:temp\w*\s+)?(?:table|view|sequence|type|index)\s+(?:if\s+not\s+exists\s+)?([\w."]+)/gi)]
@@ -95,30 +104,41 @@ jobs:
               .filter(t => !EXEMPT.test(t));
             const missing = [...new Set(referenced.filter(t => !created.has(t)))];
             if (missing.length) {
-              p.push(`引用了未建立的对象：${missing.map(t => "`" + t + "`").join(", ")}`);
+              p.push("it references objects it never creates: " +
+                     missing.map(t => "`" + t + "`").join(", "));
             }
-            if (p.length) warnings.push(`\`复现步骤\` 疑似不完整（${p.join("；")}）。`);
+            if (p.length) {
+              warnings.push(
+                `**Steps to reproduce** looks incomplete — ${p.join("; ")}. ` +
+                "A script that can be pasted straight into psql saves a " +
+                "round trip."
+              );
+            }
 
-            // ---- S2 日志或输出格式异常 ----
+            // ---- W3: output does not look like psql or server output ----
             const out = val("actual") + "\n" + val("logs");
             const LOGSHAPE = /(ERROR:|WARNING:|DETAIL:|HINT:|LINE \d|\(\d+ rows?\)|^-{3,}|\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})/m;
             const IMAGE_ONLY = /(!\[|<img)/.test(out) && !LOGSHAPE.test(out);
             if (!LOGSHAPE.test(out)) {
               warnings.push(
                 IMAGE_ONLY
-                  ? "`实际结果` 只有截图。请以文本形式粘贴 psql 输出，便于检索与复制。"
-                  : "`实际结果` / `相关日志` 不像 psql 或服务端日志的原始输出。"
+                  ? "**Actual result** is a screenshot. Please paste the psql " +
+                    "output as text so it can be searched and copied."
+                  : "**Actual result** / **Relevant logs** do not look like raw " +
+                    "psql or server output."
               );
             }
 
-            // ---- S4 未确认当前 master ----
-            if (!/\[x\]\s*我已在当前/i.test(issue.body || "")) {
+            // ---- W4: current master not confirmed ----
+            if (!/\[x\]\s*I confirmed the problem/i.test(issue.body || "")) {
               warnings.push(
-                "未确认问题在当前 `master` 上仍然存在。近期多个报告是针对已修复的代码提出的。"
+                "The report does not confirm the problem still happens on " +
+                "current `master`. Several recent reports turned out to " +
+                "describe code that had already been fixed."
               );
             }
 
-            // ================= 执行 =================
+            // ======================= act =======================
             const MARK = "<!-- issue-triage -->";
             const add = ["needs-triage"];
             if (warnings.length) add.push("needs-verification");
@@ -128,6 +148,7 @@ jobs:
               owner, repo, issue_number: issue.number, labels: add,
             });
 
+            // The reporter may have edited the issue to fix things
             if (!warnings.length && !errors.length &&
                 issue.labels.some(l => l.name === "needs-verification")) {
               await github.rest.issues.removeLabel({
@@ -137,16 +158,31 @@ jobs:
 
             const lines = [MARK];
             if (errors.length) {
-              lines.push("这份报告缺少无法绕过的信息，已先行关闭：", "");
+              lines.push(
+                "Thanks for the report. It is missing information we cannot " +
+                "work around, so I am closing it for now:", ""
+              );
               for (const e of errors) lines.push(`- ${e}`);
-              lines.push("", "补齐后请重新打开或新建 issue，我们会继续跟进。感谢反馈。");
+              lines.push(
+                "",
+                "Please reopen this issue once the details are filled in, or " +
+                "file a new one — we will pick it up from there."
+              );
             } else if (warnings.length) {
-              lines.push("已收到，并标记为 `needs-verification` —— 以下几点请确认：", "");
+              lines.push(
+                "Thanks for the report. A few things are worth confirming " +
+                "before someone digs in:", ""
+              );
               for (const w of warnings) lines.push(`- ${w}`);
-              lines.push("", "补充信息后本条会自动更新。");
+              lines.push(
+                "",
+                "Edit the issue to add the details and this comment updates " +
+                "itself."
+              );
             }
 
             if (lines.length > 1) {
+              // Keep exactly one bot comment per issue; edit it on re-runs
               const prior = (await github.paginate(github.rest.issues.listComments, {
                 owner, repo, issue_number: issue.number, per_page: 100,
               })).find(c => c.user.type === "Bot" && (c.body || "").includes(MARK));
@@ -173,7 +209,7 @@ jobs:
               });
             }
 
-            const s = ["## Issue Triage Report", `- Issue #${issue.number}`, ""];
+            const s = ["## Issue triage report", `- Issue #${issue.number}`, ""];
             if (warnings.length) {
               s.push("### Warnings");
               for (const w of warnings) s.push(`- ${w}`);
@@ -183,6 +219,6 @@ jobs:
               s.push("### Errors");
               for (const e of errors) s.push(`- ${e}`);
             } else {
-              s.push("### Result", "- 无硬失败。");
+              s.push("### Result", "- No blocking problems found.");
             }
             await core.summary.addRaw(s.join("\n")).write();
