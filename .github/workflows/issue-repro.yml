@@ -32,9 +32,9 @@ jobs:
     outputs:
       run: ${{ steps.decide.outputs.run }}
       oracle: ${{ steps.decide.outputs.oracle }}
-      sql: ${{ steps.parse.outputs.issueparser_repro }}
-      mode: ${{ steps.parse.outputs.issueparser_compatible_mode }}
-      encoding: ${{ steps.parse.outputs.issueparser_server_encoding }}
+      sql: ${{ steps.decide.outputs.sql }}
+      mode: ${{ steps.decide.outputs.mode }}
+      encoding: ${{ steps.decide.outputs.encoding }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -49,11 +49,23 @@ jobs:
       - id: decide
         uses: actions/github-script@v7
         env:
-          SQL: ${{ steps.parse.outputs.issueparser_repro }}
+          FIELDS: ${{ steps.parse.outputs.jsonString }}
         with:
           script: |
+            // 只用 jsonString —— 该 action 的单字段输出名不可靠
+            const f = JSON.parse(process.env.FIELDS || "{}");
+            const strip = s => (s || "")
+              .replace(/^\s*```[a-zA-Z]*\s*\n/, "")
+              .replace(/\n\s*```\s*$/, "")
+              .trim();
+
+            const sql = strip(f.repro);
+            core.setOutput("sql", sql);
+            core.setOutput("mode", (f.compatible_mode || "").trim());
+            core.setOutput("encoding", (f.server_encoding || "").trim());
+            console.log(`parsed: mode=${f.compatible_mode} enc=${f.server_encoding} sqlLen=${sql.length}`);
+
             const issue = context.payload.issue;
-            const sql = (process.env.SQL || "").trim();
             const isComment = context.eventName === "issue_comment";
             const cmd = isComment
               ? (context.payload.comment.body || "").trim().toLowerCase()
@@ -131,15 +143,10 @@ jobs:
           REPRO_SQL: ${{ needs.plan.outputs.sql }}
         with:
           script: |
+            // 围栏已在 plan 里剥掉，这里原样落盘
             const fs = require("fs");
             fs.mkdirSync("repro", { recursive: true });
-            // Issue Forms 的 `render: sql` 字段带 markdown 围栏，
-            // 解析器原样保留，直接喂给 psql 会在 ```sql 那行报错。
-            const raw = process.env.REPRO_SQL || "";
-            const sql = raw
-              .replace(/^\s*```[a-zA-Z]*\s*\n/, "")
-              .replace(/\n\s*```\s*$/, "");
-            fs.writeFileSync("repro/user.sql", sql);
+            fs.writeFileSync("repro/user.sql", process.env.REPRO_SQL || "");
 
       - name: decide the run matrix
         uses: actions/github-script@v7
