@@ -234,20 +234,28 @@ jobs:
           echo "sha=$(git rev-parse HEAD)" > repro/meta.txt
 
           python3 - <<'PY'
-          import json, subprocess, os
+          import json, subprocess
           cells = json.load(open("repro/matrix.json"))
           user = open("repro/user.sql").read()
           out = []
           for c in cells:
               script = f"SET ivorysql.compatible_mode = {c['mode']};\n" + user
               open("repro/cell.sql", "w").write(script)
+              # 不要 text=True：被测代码本身就可能产出在服务端编码下非法的
+              # 字节（正是 varchar2(n byte) 截断类问题的症状），解码异常会
+              # 让复现器自己崩掉，而那恰恰是最该被记录下来的现象。
               p = subprocess.run(
                   ["psql", "-h", "/tmp/rs", "-p", "55999", "-U", "repro",
                    "-d", f"db_{c['enc']}", "-X", "-a", "-v", "ON_ERROR_STOP=0",
                    "-f", "repro/cell.sql"],
-                  capture_output=True, text=True, timeout=180)
-              body = (p.stdout + p.stderr)[:4000]
-              out.append({"enc": c["enc"], "mode": c["mode"], "out": body})
+                  capture_output=True, timeout=180)
+              raw = p.stdout + p.stderr
+              try:
+                  body, invalid = raw.decode("utf-8"), False
+              except UnicodeDecodeError:
+                  body, invalid = raw.decode("utf-8", "replace"), True
+              out.append({"enc": c["enc"], "mode": c["mode"],
+                          "out": body[:4000], "invalid_bytes": invalid})
           json.dump(out, open("repro/result.json", "w"))
           PY
 
@@ -315,8 +323,17 @@ jobs:
                 lines.push(
                   `<details><summary><code>compatible_mode=${c.mode}` +
                   ` · server_encoding=${c.enc}</code></summary>`,
-                  "", "```", c.out.trimEnd(), "```", "</details>", ""
+                  "", "```", c.out.trimEnd(), "```"
                 );
+                if (c.invalid_bytes) {
+                  lines.push(
+                    "",
+                    "⚠️ 这一格的输出含有在 UTF-8 下无法解码的字节，已用 � 替换。" +
+                    "服务端返回了在自身编码下非法的数据 —— 通常意味着某处按字节" +
+                    "截断了多字节字符。"
+                  );
+                }
+                lines.push("</details>", "");
               }
               lines.push(
                 "以非 superuser 角色执行，`statement_timeout=30s`，无网络访问。",
