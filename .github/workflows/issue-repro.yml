@@ -133,6 +133,9 @@ jobs:
           # 顺带避开 uuid-ossp 这类额外依赖。
           make -j"$(nproc)" -C src
           make -C src install
+          # initdb 会加载 gb18030_2022 这个 contrib 模块，缺了它 initdb 直接
+          # FATAL: could not access file "gb18030_2022"
+          make -C contrib/gb18030_2022 install
           make -C contrib/ivorysql_ora install
           test -x "$PWD/inst/bin/initdb"        # 装好了才继续
 
