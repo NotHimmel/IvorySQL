@@ -113,10 +113,17 @@ jobs:
         env:
           CC: ccache gcc
         run: |
+          # 显式 set -e：bash 的 `-e` 对 `a && b` 里非最后一个命令不生效，
+          # 写成 `make && make install` 会让构建失败被静默跳过。
+          set -eux -o pipefail
           ./configure --prefix="$PWD/inst" --with-icu --with-libxml \
                       --with-libxslt --with-openssl --enable-rpath
-          make -j"$(nproc)" && make install
+          # 只建 src 与 ivorysql_ora —— 复现不需要其余 contrib，
+          # 顺带避开 uuid-ossp 这类额外依赖。
+          make -j"$(nproc)" -C src
+          make -C src install
           make -C contrib/ivorysql_ora install
+          test -x "$PWD/inst/bin/initdb"        # 装好了才继续
 
       # 用户 SQL 通过 env 传入并由 node 写盘，绝不经过 shell 展开。
       - name: materialise repro SQL
@@ -127,7 +134,13 @@ jobs:
           script: |
             const fs = require("fs");
             fs.mkdirSync("repro", { recursive: true });
-            fs.writeFileSync("repro/user.sql", process.env.REPRO_SQL || "");
+            // Issue Forms 的 `render: sql` 字段带 markdown 围栏，
+            // 解析器原样保留，直接喂给 psql 会在 ```sql 那行报错。
+            const raw = process.env.REPRO_SQL || "";
+            const sql = raw
+              .replace(/^\s*```[a-zA-Z]*\s*\n/, "")
+              .replace(/\n\s*```\s*$/, "");
+            fs.writeFileSync("repro/user.sql", sql);
 
       - name: decide the run matrix
         uses: actions/github-script@v7
