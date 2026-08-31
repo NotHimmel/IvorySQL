@@ -19,7 +19,8 @@ permissions:
 
 jobs:
   triage:
-    if: contains(github.event.issue.labels.*.name, 'bug')
+    # No label gate: an issue filed through the API or as a blank issue must
+    # still land in the triage queue. What differs is how much is checked.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -49,15 +50,24 @@ jobs:
               return NO_RESPONSE.test(v) ? "" : v;
             };
 
+            // An empty parse means the body did not come from the Bug Report
+            // form — `gh issue create`, the REST API and blank issues all
+            // bypass the form's own `required` validation, which is
+            // client-side only. Missing fields are then not the reporter
+            // ignoring the form; there was no form. Say so instead of closing.
+            const fromForm = Object.keys(f).length > 0;
+            const claimsBug = issue.labels.some(l => l.name === "bug");
+
             const errors = [];
             const warnings = [];
 
             // ---- E1: version cannot be traced to a tree ----
-            const version = val("version");
+            const version = fromForm ? val("version") : "";
             const vnorm = version.toLowerCase().replace(/[\s`'"]/g, "");
             const BANNED = ["latest", "newest", "master", "head", "current",
                             "trunk", "n/a", "na", "-"];
-            if (!vnorm || BANNED.some(b => vnorm === b || vnorm.includes(b))) {
+            if (fromForm &&
+                (!vnorm || BANNED.some(b => vnorm === b || vnorm.includes(b)))) {
               errors.push(
                 "**IvorySQL version** is not something we can trace back to a " +
                 "tree. Please give the output of `SELECT version();` or a " +
@@ -67,7 +77,7 @@ jobs:
             }
 
             // ---- E2: compatible mode missing ----
-            if (!val("compatible_mode")) {
+            if (fromForm && !val("compatible_mode")) {
               errors.push(
                 "**Compatible mode** is missing. Behaviour differs " +
                 "substantially between `oracle` and `pg` mode, so without it " +
@@ -76,7 +86,7 @@ jobs:
             }
 
             // ---- W1: version format unrecognised ----
-            if (!errors.length &&
+            if (fromForm && !errors.length &&
                 !/^\d+(\.\d+)*/.test(version) &&
                 !/\d+devel/i.test(version) &&
                 !/\b[0-9a-f]{7,40}\b/i.test(version)) {
@@ -87,7 +97,7 @@ jobs:
             }
 
             // ---- W2: reproduction SQL looks incomplete ----
-            const sql = val("repro");
+            const sql = fromForm ? val("repro") : "";
             const KW = /\b(select|create|insert|update|delete|alter|call|do|begin)\b/i;
             const p = [];
             if (sql.replace(/\s/g, "").length < 20) p.push("it is very short");
@@ -107,7 +117,7 @@ jobs:
               p.push("it references objects it never creates: " +
                      missing.map(t => "`" + t + "`").join(", "));
             }
-            if (p.length) {
+            if (fromForm && p.length) {
               warnings.push(
                 `**Steps to reproduce** looks incomplete — ${p.join("; ")}. ` +
                 "A script that can be pasted straight into psql saves a " +
@@ -116,10 +126,10 @@ jobs:
             }
 
             // ---- W3: output does not look like psql or server output ----
-            const out = val("actual") + "\n" + val("logs");
+            const out = fromForm ? val("actual") + "\n" + val("logs") : "";
             const LOGSHAPE = /(ERROR:|WARNING:|DETAIL:|HINT:|LINE \d|\(\d+ rows?\)|^-{3,}|\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})/m;
             const IMAGE_ONLY = /(!\[|<img)/.test(out) && !LOGSHAPE.test(out);
-            if (!LOGSHAPE.test(out)) {
+            if (fromForm && !LOGSHAPE.test(out)) {
               warnings.push(
                 IMAGE_ONLY
                   ? "**Actual result** is a screenshot. Please paste the psql " +
@@ -130,11 +140,23 @@ jobs:
             }
 
             // ---- W4: current master not confirmed ----
-            if (!/\[x\]\s*I confirmed the problem/i.test(issue.body || "")) {
+            if (fromForm && !/\[x\]\s*I confirmed the problem/i.test(issue.body || "")) {
               warnings.push(
                 "The report does not confirm the problem still happens on " +
                 "current `master`. Several recent reports turned out to " +
                 "describe code that had already been fixed."
+              );
+            }
+
+            // ---- W5: labelled a bug but not filed through the form ----
+            if (!fromForm && claimsBug) {
+              warnings.push(
+                "This was filed outside the bug report form, so the details we " +
+                "normally rely on are missing — version, compatible mode, " +
+                "server encoding and a runnable reproduction. Please add them " +
+                "here, or refile through " +
+                `[the form](https://github.com/${context.repo.owner}/` +
+                `${context.repo.repo}/issues/new?template=bug_report.yml).`
               );
             }
 

@@ -38,6 +38,9 @@ jobs:
               "steps","actual","additional","context","configuration","options",
               // Issue Form boilerplate, present in every submission
               "response_","_no_response_","noresponse","encoding","compatible",
+              // generic prose that says nothing about which code is involved
+              "created","label","labels","filing","please","through","without",
+              "instead","behaviour","behavior","following","already","against",
             ]);
 
             // A hex run is a commit SHA, not an identifier. Two reports sharing
@@ -74,9 +77,15 @@ jobs:
               const score = shared.reduce((s, t) => s + 1 / (1 + df.get(t)), 0);
               return { n: d.issue.number, title: d.issue.title,
                        state: d.issue.state, shared, score };
-            }).filter(x => x.shared.length >= 2)   // one shared word proves nothing
-              .sort((a, b) => b.score - a.score)
-              .slice(0, SHOW);
+            }).filter(x =>
+              // One shared word proves nothing; two generic ones prove little
+              // more. Require some weight and at least one token that looks
+              // like a code identifier rather than prose.
+              x.shared.length >= 2 &&
+              x.score >= 0.4 &&
+              x.shared.some(t => t.includes("_") || t.length >= 8)
+            ).sort((a, b) => b.score - a.score)
+             .slice(0, SHOW);
 
             console.log("tokens:", [...mine].slice(0, 15));
             console.log("candidates:", all.length);
