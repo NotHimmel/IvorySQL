@@ -1,11 +1,16 @@
-name: issue-dedup
+name: issue-related
 
-# Suggest possibly-related issues by the code identifiers they share.
-# Never labels and never closes: similar is not the same as duplicate.
+# List issues that touch the same code, as context for whoever picks this up.
+#
+# Deliberately not framed as duplicate detection. It never labels and never
+# closes, and it is not accurate enough to be trusted as a verdict — shared
+# identifiers mean "these two touch the same code", which is useful context
+# and nothing more. Calling it a duplicate check would promise an accuracy
+# it does not have, and make every imprecise match feel like a defect.
 #
 # Reads the REST list and matches locally rather than using the search API,
-# whose index lags issue creation by tens of seconds — which is exactly the
-# window in which duplicates tend to arrive.
+# whose index lags issue creation by tens of seconds — exactly the window in
+# which a second report of the same thing tends to arrive.
 
 on:
   issues:
@@ -15,7 +20,7 @@ permissions:
   issues: read
 
 jobs:
-  suggest:
+  related:
     runs-on: ubuntu-latest
     permissions:
       issues: write
@@ -78,9 +83,9 @@ jobs:
               return { n: d.issue.number, title: d.issue.title,
                        state: d.issue.state, shared, score };
             }).filter(x =>
-              // One shared word proves nothing; two generic ones prove little
+              // One shared word says nothing; two generic ones say little
               // more. Require some weight and at least one token that looks
-              // like a code identifier rather than prose.
+              // like a code identifier rather than ordinary prose.
               x.shared.length >= 2 &&
               x.score >= 0.4 &&
               x.shared.some(t => t.includes("_") || t.length >= 8)
@@ -97,16 +102,17 @@ jobs:
             await github.rest.issues.createComment({
               owner, repo, issue_number: issue.number,
               body: [
-                "<!-- issue-dedup -->",
-                "These issues mention some of the same code, in case any of " +
-                "them already covers this:",
+                "<!-- issue-related -->",
+                "Issues that touch the same code, for reference:",
                 "",
                 ...scored.map(s =>
                   `- #${s.n} ${s.title} — ${s.state}\n` +
                   `  shared identifiers: \`${s.shared.slice(0, 5).join("`, `")}\``
                 ),
                 "",
-                "If one of them does, please continue the discussion there. " +
-                "If none are related, ignore this comment.",
+                "This is context, not a duplicate check — the match is only " +
+                "on shared identifiers. If one of them already covers this, " +
+                "the discussion is better continued there; otherwise ignore " +
+                "this comment.",
               ].join("\n"),
             });
