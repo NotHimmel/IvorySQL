@@ -31,21 +31,55 @@ body:
     validations:
       required: true
 
-  - type: textarea
-    id: ivoryVersion
+  - type: dropdown
+    id: version
     attributes:
-      label: IvorySQL version and compatible mode
+      label: IvorySQL version
       description: |
-        The compatible mode matters for almost every report — behaviour differs substantially between `oracle` and `pg`.
-      value: |
-        <details>
+        `SELECT version()`. If you built from source or the release is not listed, pick the closest entry and give the exact version or commit SHA under "Anything else we need to know?".
+      options:
+        - master (built from source)
+        - IvorySQL 5.4
+        - IvorySQL 5.3
+        - IvorySQL 5.1
+        - IvorySQL 5.0
+        - IvorySQL 4.6
+        - IvorySQL 4.5
+        - IvorySQL 4.4
+        - IvorySQL 4.2
+        - IvorySQL 4.0
+        - IvorySQL 1.23
+        - IvorySQL 1.22
+        - IvorySQL 1.17
+        - IvorySQL 3.x or older
+        - Other / not sure
+    validations:
+      required: true
 
-        ```console
-        $ psql -c "SELECT version()" -c "SHOW ivorysql.compatible_mode" -c "SHOW server_encoding"
-        # paste output here
-        ```
+  - type: dropdown
+    id: compatible_mode
+    attributes:
+      label: Compatible mode
+      description: |
+        `SHOW ivorysql.compatible_mode`. Behaviour differs substantially between the two — down to whether `''` is NULL and whether `DUAL` exists.
+      options:
+        - oracle
+        - pg
+        - Both
+    validations:
+      required: true
 
-        </details>
+  - type: dropdown
+    id: server_encoding
+    attributes:
+      label: Server encoding
+      description: "`SHOW server_encoding`"
+      options:
+        - UTF8
+        - GB18030
+        - SQL_ASCII
+        - EUC_CN
+        - Other / not sure
     validations:
       required: true
 
