@@ -36,12 +36,18 @@ jobs:
               "report","should","which","because","between","string","parameter",
               "function","default","output","github","master","commit","reproduce",
               "steps","actual","additional","context","configuration","options",
+              // Issue Forms 自身的产物，会出现在每一份报告里
+              "response_","_no_response_","noresponse",
             ]);
+
+            // 十六进制串（commit SHA）不是标识符 —— 同一版本的报告会共享它，
+            // 那只说明报告人抄了同一个版本号，不说明问题相关
+            const isHex = t => /^[0-9a-f]{7,}$/.test(t);
 
             const tokenize = (s) => new Set(
               (s.match(/[A-Za-z_][A-Za-z0-9_]{4,}/g) || [])
                 .map(t => t.toLowerCase())
-                .filter(t => !STOP.has(t))
+                .filter(t => !STOP.has(t) && !isHex(t))
             );
 
             const mine = tokenize(`${issue.title}\n${issue.body || ""}`);
