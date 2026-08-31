@@ -178,13 +178,19 @@ jobs:
               : declaredMode === "pg"       ? ["pg"]
               : ["oracle"];                 // default, and for "unrelated to mode"
 
-            // Encoding: the declared one, plus UTF8 and SQL_ASCII when the SQL
-            // contains non-ASCII, which is what exposes encoding-dependent claims
-            const KNOWN = ["UTF8", "GB18030", "SQL_ASCII", "EUC_CN"];
+            // Encoding. The form offers UTF8 or Other, because UTF8 covers
+            // almost every report and a longer list only crowds the picker.
+            // "Other" therefore leaves the exact encoding unknown: run UTF8
+            // and SQL_ASCII, which between them cover "strict validation" and
+            // "accepts any bytes", and say so in the comment.
             const encs = new Set();
-            if (KNOWN.includes(declaredEnc)) encs.add(declaredEnc);
+            const encUnknown = declaredEnc !== "" && declaredEnc !== "UTF8";
+            if (encUnknown) { encs.add("UTF8"); encs.add("SQL_ASCII"); }
             else encs.add("UTF8");
+            // Non-ASCII in the SQL is worth contrasting regardless of what was
+            // declared, since that is where encoding-dependent claims break.
             if (/[^\x00-\x7F]/.test(sql)) { encs.add("UTF8"); encs.add("SQL_ASCII"); }
+            fs.writeFileSync("repro/encunknown.txt", encUnknown ? "1" : "0");
 
             fs.writeFileSync("repro/encodings.txt", [...encs].join("\n") + "\n");
             fs.writeFileSync("repro/matrix.json",
@@ -278,6 +284,7 @@ jobs:
           path: |
             repro/result.json
             repro/meta.txt
+            repro/encunknown.txt
           retention-days: 3
 
   # ---------------------------------------------------------------
@@ -304,7 +311,7 @@ jobs:
             const { owner, repo } = context.repo;
             const issue_number = context.payload.issue.number;
 
-            let cells = [], sha = "unknown";
+            let cells = [], sha = "unknown", encUnknown = false;
             try {
               cells = JSON.parse(fs.readFileSync("repro/result.json", "utf8"));
               sha = (fs.readFileSync("repro/meta.txt", "utf8")
@@ -312,6 +319,9 @@ jobs:
             } catch (e) {
               console.log("no result artifact:", e.message);
             }
+            try {
+              encUnknown = fs.readFileSync("repro/encunknown.txt", "utf8").trim() === "1";
+            } catch { /* older runs did not record it */ }
 
             const lines = [MARK];
             if (!cells.length) {
@@ -342,6 +352,15 @@ jobs:
                   );
                 }
                 lines.push("</details>", "");
+              }
+              if (encUnknown) {
+                lines.push(
+                  "The report says the server encoding is not UTF8 but does " +
+                  "not say which, so this ran under UTF8 and SQL_ASCII. If " +
+                  "the specific encoding matters here, say which one and " +
+                  "comment `/repro` to run again.",
+                  ""
+                );
               }
               lines.push(
                 "Run as a non-superuser role with `statement_timeout=30s` and",
