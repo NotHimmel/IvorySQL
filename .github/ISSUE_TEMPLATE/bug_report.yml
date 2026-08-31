@@ -1,61 +1,15 @@
-name: "🐛 Bug Report"
-description: Something does not behave as expected
+name: Bug Report
+description: Report a bug encountered while using IvorySQL
 labels: ["bug", "needs-triage"]
 body:
-  - type: markdown
-    attributes:
-      value: |
-        Please give as much detail as you can. Reports that leave out the
-        version or the compatible mode usually cannot be acted on at all.
-
-        If this is a security issue, please report it privately instead —
-        see [SECURITY.md](https://github.com/IvorySQL/IvorySQL/blob/master/.github/SECURITY.md).
-
-  - type: input
-    id: version
-    attributes:
-      label: IvorySQL version
-      description: >
-        The output of `SELECT version();`, or a commit SHA. Values such as
-        `latest`, `newest` or `master` cannot be traced back to a tree.
-      placeholder: "IvorySQL 4.5 ... or ba264e96bfe"
-    validations:
-      required: true
-
-  - type: dropdown
-    id: compatible_mode
-    attributes:
-      label: Compatible mode
-      description: "`SHOW ivorysql.compatible_mode;`"
-      options:
-        - oracle
-        - pg
-        - Happens in both modes
-        - Unrelated to compatible mode
-    validations:
-      required: true
-
-  - type: dropdown
-    id: server_encoding
-    attributes:
-      label: Server encoding
-      description: "`SHOW server_encoding;`"
-      options:
-        - UTF8
-        - GB18030
-        - SQL_ASCII
-        - EUC_CN
-        - Other / not sure
-    validations:
-      required: true
-
   - type: textarea
-    id: what_happened
+    id: problem
     attributes:
       label: What happened?
-      description: >
-        What you observed. Real output pasted as text is far more useful than
-        a description of it, and far more useful than a screenshot.
+      description: |
+        Please provide as much info as possible. Not doing so may result in your bug not being addressed in a timely manner.
+        Real output pasted as text is far more useful than a description of it, and far more useful than a screenshot.
+        If this matter is security related, please disclose it privately as described in [SECURITY.md](https://github.com/IvorySQL/IvorySQL/blob/master/.github/SECURITY.md)
     validations:
       required: true
 
@@ -63,36 +17,97 @@ body:
     id: expected
     attributes:
       label: What did you expect to happen?
-      description: >
-        If the expectation comes from Oracle, please include the real Oracle
-        output and the version it came from.
+      description: |
+        If the expectation comes from Oracle, please include the real Oracle output and the Oracle version it came from.
     validations:
       required: true
 
   - type: textarea
     id: repro
     attributes:
-      label: How can we reproduce it, as minimally and precisely as possible?
-      description: >
-        Whatever it takes — SQL, shell commands, a configuration, a sequence
-        of sessions. Not every problem reduces to a script, so write what
-        actually reproduces it.
-
-
-        One thing worth knowing: if part of it is a self-contained SQL script
-        and you put it in a ```sql code block, CI will run that block against
-        current `master` and post the real output here. That often settles a
-        report in one round instead of three.
+      label: How can we reproduce it (as minimally and precisely as possible)?
+      description: |
+        Whatever it takes — SQL, shell commands, a configuration, a sequence of sessions. Not every problem reduces to a script, so please write what actually reproduces it.
     validations:
       required: true
 
   - type: textarea
-    id: anything_else
+    id: additional
     attributes:
       label: Anything else we need to know?
-      description: >
-        Server logs, build configuration, how the instance was set up,
-        anything that seemed relevant.
+
+  - type: textarea
+    id: ivoryVersion
+    attributes:
+      label: IvorySQL version and compatible mode
+      description: |
+        The compatible mode matters for almost every report — behaviour differs substantially between `oracle` and `pg`.
+      value: |
+        <details>
+
+        ```console
+        $ psql -c "SELECT version()" -c "SHOW ivorysql.compatible_mode" -c "SHOW server_encoding"
+        # paste output here
+        ```
+
+        </details>
+    validations:
+      required: true
+
+  - type: textarea
+    id: osVersion
+    attributes:
+      label: OS version
+      value: |
+        <details>
+
+        ```console
+        $ cat /etc/os-release
+        # paste output here
+        $ uname -a
+        # paste output here
+        ```
+
+        </details>
+
+  - type: textarea
+    id: installMethod
+    attributes:
+      label: How was IvorySQL installed?
+      description: |
+        Built from source, RPM or DEB package, container image, or something else. If built from source, the `configure` line or `meson setup` arguments are useful.
+      value: |
+        <details>
+
+        </details>
+
+  - type: textarea
+    id: settings
+    attributes:
+      label: Non-default settings (if applicable)
+      value: |
+        <details>
+
+        ```console
+        $ psql -c "SELECT name, setting, source FROM pg_settings WHERE source NOT IN ('default', 'override')"
+        # paste output here
+        ```
+
+        </details>
+
+  - type: textarea
+    id: extensions
+    attributes:
+      label: Installed extensions (if applicable)
+      value: |
+        <details>
+
+        ```console
+        $ psql -c "\dx"
+        # paste output here
+        ```
+
+        </details>
 
   - type: checkboxes
     id: preflight
