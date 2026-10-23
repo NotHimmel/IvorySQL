@@ -5,7 +5,7 @@
  *
  * Portions Copyright (c) 1996-2025, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
- * Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+ * Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
  *
  *
  * IDENTIFICATION
@@ -1297,12 +1297,8 @@ exprSetCollation(Node *expr, Oid collation)
 			}
 			break;
 		case T_JsonBehavior:
-			{
-				JsonBehavior *behavior = (JsonBehavior *) expr;
-
-				if (behavior->expr)
-					exprSetCollation(behavior->expr, collation);
-			}
+			Assert(((JsonBehavior *) expr)->expr == NULL ||
+				   exprCollation(((JsonBehavior *) expr)->expr) == collation);
 			break;
 		case T_NullTest:
 			/* NullTest's result is boolean ... */
@@ -4469,17 +4465,12 @@ raw_expression_tree_walker_impl(Node *node,
 			break;
 		case T_ColumnRefOrFuncCall:
 			{
-				FuncCall   *fcall = ((ColumnRefOrFuncCall *) node)->func;
+				ColumnRefOrFuncCall *colf = (ColumnRefOrFuncCall *) node;
 
-				if (WALK(fcall->args))
+				if (colf->cref && WALK(colf->cref))
 					return true;
-				if (WALK(fcall->agg_order))
+				if (colf->func && WALK(colf->func))
 					return true;
-				if (WALK(fcall->agg_filter))
-					return true;
-				if (WALK(fcall->over))
-					return true;
-				/* function name is deemed uninteresting */
 			}
 			break;
 		case T_NamedArgExpr:

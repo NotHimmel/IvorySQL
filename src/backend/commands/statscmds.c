@@ -57,9 +57,15 @@ compare_int16(const void *a, const void *b)
 
 /*
  *		CREATE STATISTICS
+ *
+ * relids is a list of OIDs of relations specified in the FROM clause, on which
+ * the statistics object is defined. We identify the target by the passed-in
+ * OID rather than re-resolving stmt->relations by name, so that we operate
+ * on exactly the relation the caller looked up. Only a single relation is
+ * supported for now.
  */
 ObjectAddress
-CreateStatistics(CreateStatsStmt *stmt)
+CreateStatistics(List *relids, CreateStatsStmt *stmt, bool check_rights)
 {
 	int16		attnums[STATS_MAX_DIMENSIONS];
 	int			nattnums = 0;
@@ -68,7 +74,7 @@ CreateStatistics(CreateStatsStmt *stmt)
 	NameData	stxname;
 	Oid			statoid;
 	Oid			namespaceId;
-	Oid			stxowner = GetUserId();
+	Oid			stxowner = OidIsValid(stmt->owner) ? stmt->owner : GetUserId();
 	HeapTuple	htup;
 	Datum		values[Natts_pg_statistic_ext];
 	bool		nulls[Natts_pg_statistic_ext];
@@ -77,7 +83,7 @@ CreateStatistics(CreateStatsStmt *stmt)
 	Datum		exprsDatum;
 	Relation	statrel;
 	Relation	rel = NULL;
-	Oid			relid;
+	Oid			relid = InvalidOid;
 	ObjectAddress parentobject,
 				myself;
 	Datum		types[4];		/* one for each possible type of statistic */
@@ -95,24 +101,17 @@ CreateStatistics(CreateStatsStmt *stmt)
 	Assert(IsA(stmt, CreateStatsStmt));
 
 	/*
-	 * Examine the FROM clause.  Currently, we only allow it to be a single
-	 * simple table, but later we'll probably allow multiple tables and JOIN
-	 * syntax.  The grammar is already prepared for that, so we have to check
-	 * here that what we got is what we can support.
+	 * Currently, we only allow the FROM clause to be a single simple table,
+	 * but later we'll probably allow multiple tables and JOIN syntax.  The
+	 * grammar and the loop below are already prepared for that, but examining
+	 * the FROM clause is the caller's job, so all we do here is assert that
+	 * the caller rejected what we can't support.
 	 */
-	if (list_length(stmt->relations) != 1)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("only a single relation is allowed in CREATE STATISTICS")));
+	Assert(list_length(relids) == 1);
 
-	foreach(cell, stmt->relations)
+	foreach(cell, relids)
 	{
-		Node	   *rln = (Node *) lfirst(cell);
-
-		if (!IsA(rln, RangeVar))
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("only a single relation is allowed in CREATE STATISTICS")));
+		relid = lfirst_oid(cell);
 
 		/*
 		 * CREATE STATISTICS will influence future execution plans but does
@@ -121,7 +120,7 @@ CreateStatistics(CreateStatsStmt *stmt)
 		 * conflicting with ANALYZE and other DDL that sets statistical
 		 * information, but not with normal queries.
 		 */
-		rel = relation_openrv((RangeVar *) rln, ShareUpdateExclusiveLock);
+		rel = relation_open(relid, ShareUpdateExclusiveLock);
 
 		/* Restrict to allowed relation types */
 		if (rel->rd_rel->relkind != RELKIND_RELATION &&
@@ -134,8 +133,12 @@ CreateStatistics(CreateStatsStmt *stmt)
 							RelationGetRelationName(rel)),
 					 errdetail_relkind_not_supported(rel->rd_rel->relkind)));
 
-		/* You must own the relation to create stats on it */
-		if (!object_ownercheck(RelationRelationId, RelationGetRelid(rel), stxowner))
+		/*
+		 * You must own the relation to create stats on it. Skip check if
+		 * caller doesn't want it.
+		 */
+		if (check_rights &&
+			!object_ownercheck(RelationRelationId, RelationGetRelid(rel), stxowner))
 			aclcheck_error(ACLCHECK_NOT_OWNER, get_relkind_objtype(rel->rd_rel->relkind),
 						   RelationGetRelationName(rel));
 
@@ -148,7 +151,6 @@ CreateStatistics(CreateStatsStmt *stmt)
 	}
 
 	Assert(rel);
-	relid = RelationGetRelid(rel);
 
 	/*
 	 * If the node has a name, split it up and determine creation namespace.
@@ -168,6 +170,21 @@ CreateStatistics(CreateStatsStmt *stmt)
 											  namespaceId);
 	}
 	namestrcpy(&stxname, namestr);
+
+	/*
+	 * Check we have creation rights in target namespace.  Skip check if
+	 * caller doesn't want it.
+	 */
+	if (check_rights)
+	{
+		AclResult	aclresult;
+
+		aclresult = object_aclcheck(NamespaceRelationId, namespaceId,
+									GetUserId(), ACL_CREATE);
+		if (aclresult != ACLCHECK_OK)
+			aclcheck_error(aclresult, OBJECT_SCHEMA,
+						   get_namespace_name(namespaceId));
+	}
 
 	/*
 	 * Deal with the possibility that the statistics object already exists.
@@ -579,11 +596,16 @@ CreateStatistics(CreateStatsStmt *stmt)
 	 * just like we do for index expressions.
 	 */
 	if (stxexprs)
+	{
+		if (check_rights)
+			CheckUsageOnTypesInSingleRelExpr((Node *) stxexprs, relid, GetUserId());
+
 		recordDependencyOnSingleRelExpr(&myself,
 										(Node *) stxexprs,
 										relid,
 										DEPENDENCY_NORMAL,
 										DEPENDENCY_AUTO, false);
+	}
 
 	/*
 	 * Also add dependencies on namespace and owner.  These are required

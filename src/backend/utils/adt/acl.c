@@ -5,7 +5,7 @@
  *
  * Portions Copyright (c) 1996-2025, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
- * Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+ * Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
  *
  *
  * IDENTIFICATION
@@ -81,7 +81,7 @@ enum RoleRecurseType
 };
 static Oid	cached_role[] = {InvalidOid, InvalidOid, InvalidOid};
 static List *cached_roles[] = {NIL, NIL, NIL};
-static uint32 cached_db_hash;
+uint32		cached_db_hash;
 
 /*
  * If the list of roles gathered by roles_is_member_of() grows larger than the

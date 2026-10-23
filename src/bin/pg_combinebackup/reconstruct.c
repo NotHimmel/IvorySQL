@@ -370,6 +370,7 @@ reconstruct_from_incremental_file(char *input_filename,
 		if (s->relative_block_numbers != NULL)
 			pfree(s->relative_block_numbers);
 		pg_free(s->filename);
+		pg_free(s);
 	}
 	pfree(sourcemap);
 	pfree(offsetmap);
@@ -517,6 +518,7 @@ make_rfile(char *filename, bool missing_ok)
 	{
 		if (missing_ok && errno == ENOENT)
 		{
+			pg_free(rf->filename);
 			pg_free(rf);
 			return NULL;
 		}
@@ -702,6 +704,9 @@ write_reconstructed_file(char *input_filename,
 
 				if (wb < 0)
 					pg_fatal("error while copying file range from \"%s\" to \"%s\": %m",
+							 input_filename, output_filename);
+				else if (wb == 0)
+					pg_fatal("unexpected end of file while copying file range from \"%s\" to \"%s\"",
 							 input_filename, output_filename);
 
 				nwritten += wb;

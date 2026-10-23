@@ -8,7 +8,7 @@
  *
  * Portions Copyright (c) 1996-2025, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
- * Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+ * Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
  *
  * src/fe_utils/string_utils.c
  *
@@ -104,14 +104,15 @@ getFmtEncoding(void)
 const char *
 fmtIdEnc(const char *rawid, int encoding)
 {
-	if (DB_ORACLE == db_mode)
-		return ora_fmtId(rawid);
-
-	PQExpBuffer id_return = getLocalPQExpBuffer();
-
+	PQExpBuffer id_return;
 	const char *cp;
 	bool		need_quotes = false;
 	size_t		remaining = strlen(rawid);
+
+	if (DB_ORACLE == db_mode)
+		return ora_fmtId(rawid);
+
+	id_return = getLocalPQExpBuffer();
 
 	/*
 	 * These checks need to match the identifier production in scan.l. Don't
@@ -809,6 +810,116 @@ appendPsqlMetaConnect(PQExpBuffer buf, const char *dbname)
 		appendPQExpBufferStr(buf, fmtIdEnc(dbname, PG_SQL_ASCII));
 	}
 	appendPQExpBufferChar(buf, '\n');
+}
+
+
+/*
+ * SplitGUCList --- parse a string containing identifiers or file names
+ *
+ * This is used to split the value of a GUC_LIST_QUOTE GUC variable, without
+ * presuming whether the elements will be taken as identifiers or file names.
+ * See comparable code in src/backend/utils/adt/varlena.c.
+ *
+ * Inputs:
+ *	rawstring: the input string; must be overwritable!	On return, it's
+ *			   been modified to contain the separated identifiers.
+ *	separator: the separator punctuation expected between identifiers
+ *			   (typically '.' or ',').  Whitespace may also appear around
+ *			   identifiers.
+ * Outputs:
+ *	namelist: receives a malloc'd, null-terminated array of pointers to
+ *			  identifiers within rawstring.  Caller should free this
+ *			  even on error return.
+ *
+ * Returns true if okay, false if there is a syntax error in the string.
+ */
+bool
+SplitGUCList(char *rawstring, char separator,
+			 char ***namelist)
+{
+	char	   *nextp = rawstring;
+	bool		done = false;
+	char	  **nextptr;
+
+	/*
+	 * Since we disallow empty identifiers, this is a conservative
+	 * overestimate of the number of pointers we could need.  Allow one for
+	 * list terminator.
+	 */
+	*namelist = nextptr =
+		pg_malloc_array(char *, (strlen(rawstring) / 2 + 2));
+	*nextptr = NULL;
+
+	while (isspace((unsigned char) *nextp))
+		nextp++;				/* skip leading whitespace */
+
+	if (*nextp == '\0')
+		return true;			/* allow empty string */
+
+	/* At the top of the loop, we are at start of a new identifier. */
+	do
+	{
+		char	   *curname;
+		char	   *endp;
+
+		if (*nextp == '"')
+		{
+			/* Quoted name --- collapse quote-quote pairs */
+			curname = nextp + 1;
+			for (;;)
+			{
+				endp = strchr(nextp + 1, '"');
+				if (endp == NULL)
+					return false;	/* mismatched quotes */
+				if (endp[1] != '"')
+					break;		/* found end of quoted name */
+				/* Collapse adjacent quotes into one quote, and look again */
+				memmove(endp, endp + 1, strlen(endp));
+				nextp = endp;
+			}
+			/* endp now points at the terminating quote */
+			nextp = endp + 1;
+		}
+		else
+		{
+			/* Unquoted name --- extends to separator or whitespace */
+			curname = nextp;
+			while (*nextp && *nextp != separator &&
+				   !isspace((unsigned char) *nextp))
+				nextp++;
+			endp = nextp;
+			if (curname == nextp)
+				return false;	/* empty unquoted name not allowed */
+		}
+
+		while (isspace((unsigned char) *nextp))
+			nextp++;			/* skip trailing whitespace */
+
+		if (*nextp == separator)
+		{
+			nextp++;
+			while (isspace((unsigned char) *nextp))
+				nextp++;		/* skip leading whitespace for next */
+			/* we expect another name, so done remains false */
+		}
+		else if (*nextp == '\0')
+			done = true;
+		else
+			return false;		/* invalid syntax */
+
+		/* Now safe to overwrite separator with a null */
+		*endp = '\0';
+
+		/*
+		 * Finished isolating current name --- add it to output array
+		 */
+		*nextptr++ = curname;
+
+		/* Loop back if we didn't reach end of string */
+	} while (!done);
+
+	*nextptr = NULL;
+	return true;
 }
 
 

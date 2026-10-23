@@ -452,7 +452,7 @@ pg_regcomp(regex_t *re,
 
 	/* parsing */
 	lexstart(v);				/* also handles prefixes */
-	if ((v->cflags & REG_NLSTOP) || (v->cflags & REG_NLANCH))
+	if (v->cflags & (REG_NLSTOP | REG_NLANCH | REG_NLDOT))
 	{
 		/* assign newline a unique color */
 		v->nlcolor = subcolor(v->cm, newline());
@@ -561,6 +561,7 @@ moresubs(struct vars *v,
 	assert(wanted > 0 && (size_t) wanted >= v->nsubs);
 	n = (size_t) wanted * 3 / 2 + 1;
 
+	/* n is bounded by the number of states, so no chance of overflow here */
 	if (v->subs == v->sub10)
 	{
 		p = (struct subre **) MALLOC(n * sizeof(struct subre *));
@@ -1002,7 +1003,8 @@ parseqatom(struct vars *v,
 			break;
 		case '.':
 			rainbow(v->nfa, v->cm, PLAIN,
-					(v->cflags & REG_NLSTOP) ? v->nlcolor : COLORLESS,
+					(v->cflags & (REG_NLSTOP | REG_NLDOT)) ?
+					v->nlcolor : COLORLESS,
 					lp, rp);
 			NEXT();
 			break;
@@ -2405,8 +2407,8 @@ newlacon(struct vars *v,
 	else
 	{
 		n = v->nlacons;
-		newlacons = (struct subre *) REALLOC(v->lacons,
-											 (n + 1) * sizeof(struct subre));
+		/* better use REALLOC_ARRAY here, as struct subre is big */
+		newlacons = REALLOC_ARRAY(v->lacons, struct subre, n + 1);
 	}
 	if (newlacons == NULL)
 	{

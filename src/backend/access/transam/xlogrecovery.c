@@ -45,6 +45,7 @@
 #include "commands/tablespace.h"
 #include "common/file_utils.h"
 #include "miscadmin.h"
+#include "nodes/miscnodes.h"
 #include "pgstat.h"
 #include "postmaster/bgwriter.h"
 #include "postmaster/startup.h"
@@ -531,6 +532,15 @@ InitWalRecovery(ControlFileData *ControlFile, bool *wasShutdown_ptr,
 	dbstate_at_startup = ControlFile->state;
 
 	/*
+	 * A startup process always starts with an inconsistent database. Set the
+	 * flag accordingly, even if it was inherited from a postmaster that had
+	 * already marked the database as consistent. This keeps the invariant
+	 * local to the startup process without requiring every fork path to clear
+	 * the flag.
+	 */
+	reachedConsistency = false;
+
+	/*
 	 * Initialize on the assumption we want to recover to the latest timeline
 	 * that's active according to pg_control.
 	 */
@@ -803,6 +813,16 @@ InitWalRecovery(ControlFileData *ControlFile, bool *wasShutdown_ptr,
 		}
 		memcpy(&checkPoint, XLogRecGetData(xlogreader), sizeof(CheckPoint));
 		wasShutdown = ((record->xl_info & ~XLR_INFO_MASK) == XLOG_CHECKPOINT_SHUTDOWN);
+
+		/* Make sure that REDO location exists. */
+		if (checkPoint.redo < CheckPointLoc)
+		{
+			XLogPrefetcherBeginRead(xlogprefetcher, checkPoint.redo);
+			if (!ReadRecord(xlogprefetcher, LOG, false, checkPoint.ThisTimeLineID))
+				ereport(PANIC,
+						errmsg("could not find redo location %X/%08X referenced by checkpoint record at %X/%08X",
+							   LSN_FORMAT_ARGS(checkPoint.redo), LSN_FORMAT_ARGS(CheckPointLoc)));
+		}
 	}
 
 	if (ArchiveRecoveryRequested)
@@ -3420,8 +3440,10 @@ retry:
 
 		pgstat_report_wait_end();
 
-		pgstat_count_io_op_time(IOOBJECT_WAL, IOCONTEXT_NORMAL, IOOP_READ,
-								io_start, 1, r);
+		/* Count I/O stats only for successful short reads */
+		if (r > 0)
+			pgstat_count_io_op_time(IOOBJECT_WAL, IOCONTEXT_NORMAL, IOOP_READ,
+									io_start, 1, r);
 
 		XLogFileName(fname, curFileTLI, readSegNo, wal_segment_size);
 		if (r < 0)
@@ -3685,8 +3707,19 @@ WaitForWALToBecomeAvailable(XLogRecPtr RecPtr, bool randAccess,
 					 * Before we leave XLOG_FROM_STREAM state, make sure that
 					 * walreceiver is not active, so that it won't overwrite
 					 * WAL that we restore from archive.
+					 *
+					 * If walreceiver is actively streaming (or attempting to
+					 * connect), we must shut it down. However, if it's
+					 * already in WAITING state (e.g., due to timeline
+					 * divergence), we only need to reset the install flag to
+					 * allow archive restoration.
 					 */
-					XLogShutdownWalRcv();
+					if (WalRcvStreaming())
+						XLogShutdownWalRcv();
+					else
+					{
+						ResetInstallXLogFileSegmentActive();
+					}
 
 					/*
 					 * Before we sleep, re-scan for possible new timelines if
@@ -4759,9 +4792,20 @@ RecoveryRequiresIntParameter(const char *param_name, int currValue, int minValue
 bool
 check_primary_slot_name(char **newval, void **extra, GucSource source)
 {
+	int			err_code;
+	char	   *err_msg = NULL;
+	char	   *err_hint = NULL;
+
 	if (*newval && strcmp(*newval, "") != 0 &&
-		!ReplicationSlotValidateName(*newval, WARNING))
+		!ReplicationSlotValidateNameInternal(*newval, &err_code, &err_msg,
+											 &err_hint))
+	{
+		GUC_check_errcode(err_code);
+		GUC_check_errdetail("%s", err_msg);
+		if (err_hint != NULL)
+			GUC_check_errhint("%s", err_hint);
 		return false;
+	}
 
 	return true;
 }

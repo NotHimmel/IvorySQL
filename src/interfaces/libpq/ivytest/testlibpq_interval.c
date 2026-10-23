@@ -4,7 +4,7 @@
  *
  * Test the C version of LIBPQ, the POSTGRES frontend library.  
  *
- * Portions Copyright (c) 2025, IvorySQL Global Development Team
+ * Portions Copyright (c) 2025-2026, IvorySQL Global Development Team
  *
  * src/interfaces/libpq/ivytest/testlibpq_interval.c
  *
@@ -174,7 +174,10 @@ main()
 {
 	Ivyconn    *conn;
 	Ivyresult   *res;
-	const char *conninfo="user=system dbname=postgres port=1521";
+	const char *pgport = getenv("PGPORT");
+	const char *conninfo = (pgport && pgport[0]) ?
+		"user=system dbname=postgres" :
+		"user=system dbname=postgres port=1521";
 
 	/* make a connection to the database */
 	conn = Ivyconnectdb(conninfo);

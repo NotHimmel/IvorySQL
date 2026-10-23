@@ -11,7 +11,7 @@
  *
  * Portions Copyright (c) 1996-2025, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
- * Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+ * Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
  *
  * IDENTIFICATION
  *	  src/backend/catalog/namespace.c
@@ -1834,7 +1834,7 @@ MatchNamedCall(HeapTuple proctup, int nargs, List *argnames,
 	Oid		   *p_argtypes;
 	char	  **p_argnames;
 	char	   *p_argmodes;
-	bool		arggiven[FUNC_MAX_ARGS];
+	bool	   *arggiven;
 	bool		isnull;
 	int			ap;				/* call args position */
 	int			pp;				/* proargs position */
@@ -1858,8 +1858,8 @@ MatchNamedCall(HeapTuple proctup, int nargs, List *argnames,
 	Assert(include_out_arguments ? (pronargs == pronallargs) : (pronargs <= pronallargs));
 
 	/* initialize state for matching */
-	*argnumbers = (int *) palloc(pronargs * sizeof(int));
-	memset(arggiven, false, pronargs * sizeof(bool));
+	*argnumbers = palloc_array(int, pronargs);
+	arggiven = palloc0_array(bool, pronallargs);
 
 	/* there are numposargs positional args before the named args */
 	for (ap = 0; ap < numposargs; ap++)
@@ -2927,6 +2927,9 @@ StatisticsObjIsVisibleExt(Oid stxid, bool *is_missing)
 		foreach(l, activeSearchPath)
 		{
 			Oid			namespaceId = lfirst_oid(l);
+
+			if (namespaceId == myTempNamespace)
+				continue;		/* do not look in temp namespace */
 
 			if (namespaceId == stxnamespace)
 			{

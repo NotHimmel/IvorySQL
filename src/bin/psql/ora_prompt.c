@@ -1,7 +1,7 @@
 /*
  * psql - the PostgreSQL interactive terminal
  *
- * Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+ * Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
  * Portions Copyright (c) 2000-2024, PostgreSQL Global Development Group
  *
  * src/bin/psql/prompt.c
@@ -176,6 +176,21 @@ ora_get_prompt(Ora_promptStatus_t status, ConditionalStack cstack)
 
 						if (pid)
 							snprintf(buf, sizeof(buf), "%d", pid);
+					}
+					break;
+
+					/* pipeline status */
+				case 'P':
+					if (pset.db)
+					{
+						PGpipelineStatus status = PQpipelineStatus(pset.db);
+
+						if (status == PQ_PIPELINE_ON)
+							strlcpy(buf, "on", sizeof(buf));
+						else if (status == PQ_PIPELINE_ABORTED)
+							strlcpy(buf, "abort", sizeof(buf));
+						else
+							strlcpy(buf, "off", sizeof(buf));
 					}
 					break;
 

@@ -5,7 +5,7 @@
  *
  * Copyright:
  * Copyright (c) 2000-2024, PostgreSQL Global Development Group
- * Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+ * Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
  *
  * src/bin/psql/ora_psqlscanslash.h
  */
@@ -35,6 +35,11 @@ extern char *ora_psql_scan_slash_option(PsqlScanState state,
 					   bool semicolon);
 
 extern void ora_psql_scan_slash_command_end(PsqlScanState state);
+
+extern PsqlScanStateSave *ora_psql_scan_get_lex_state(PsqlScanState state);
+
+extern void ora_psql_scan_set_lex_state(PsqlScanState state,
+										const PsqlScanStateSave *lex_state);
 
 extern int	ora_psql_scan_get_paren_depth(PsqlScanState state);
 

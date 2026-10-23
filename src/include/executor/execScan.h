@@ -23,12 +23,12 @@
  * This routine substitutes a test tuple if inside an EvalPlanQual recheck.
  * Otherwise, it simply executes the access method's next-tuple routine.
  *
- * The pg_attribute_always_inline attribute allows the compiler to inline
- * this function into its caller. When EPQState is NULL, the EvalPlanQual
- * logic is completely eliminated at compile time, avoiding unnecessary
- * run-time checks and code for cases where EPQ is not required.
+ * The pg_always_inline attribute allows the compiler to inline this function
+ * into its caller. When EPQState is NULL, the EvalPlanQual logic is completely
+ * eliminated at compile time, avoiding unnecessary run-time checks and code
+ * for cases where EPQ is not required.
  */
-static pg_attribute_always_inline TupleTableSlot *
+static pg_always_inline TupleTableSlot *
 ExecScanFetch(ScanState *node,
 			  EPQState *epqstate,
 			  ExecScanAccessMtd accessMtd,
@@ -49,16 +49,24 @@ ExecScanFetch(ScanState *node,
 		{
 			/*
 			 * This is a ForeignScan or CustomScan which has pushed down a
-			 * join to the remote side.  The recheck method is responsible not
-			 * only for rechecking the scan/join quals but also for storing
-			 * the correct tuple in the slot.
+			 * join to the remote side.  If it is a descendant node in the EPQ
+			 * recheck plan tree, run the recheck method function.  Otherwise,
+			 * run the access method function below.
 			 */
+			if (bms_is_member(epqstate->epqParam, node->ps.plan->extParam))
+			{
+				/*
+				 * The recheck method is responsible not only for rechecking
+				 * the scan/join quals but also for storing the correct tuple
+				 * in the slot.
+				 */
 
-			TupleTableSlot *slot = node->ss_ScanTupleSlot;
+				TupleTableSlot *slot = node->ss_ScanTupleSlot;
 
-			if (!(*recheckMtd) (node, slot))
-				ExecClearTuple(slot);	/* would not be returned by scan */
-			return slot;
+				if (!(*recheckMtd) (node, slot))
+					ExecClearTuple(slot);	/* would not be returned by scan */
+				return slot;
+			}
 		}
 		else if (epqstate->relsubs_done[scanrelid - 1])
 		{
@@ -136,9 +144,9 @@ ExecScanFetch(ScanState *node,
  * conditions enforced by the access method.
  *
  * This function is an alternative to ExecScan, used when callers may omit
- * 'qual' or 'projInfo'. The pg_attribute_always_inline attribute allows the
- * compiler to eliminate non-relevant branches at compile time, avoiding
- * run-time checks in those cases.
+ * 'qual' or 'projInfo'. The pg_always_inline attribute allows the compiler
+ * to eliminate non-relevant branches at compile time, avoiding run-time
+ * checks in those cases.
  *
  * Conditions:
  *	-- The AMI "cursor" is positioned at the previously returned tuple.
@@ -148,7 +156,7 @@ ExecScanFetch(ScanState *node,
  *	positioned before the first qualifying tuple.
  * ----------------------------------------------------------------
  */
-static pg_attribute_always_inline TupleTableSlot *
+static pg_always_inline TupleTableSlot *
 ExecScanExtended(ScanState *node,
 				 ExecScanAccessMtd accessMtd,	/* function returning a tuple */
 				 ExecScanRecheckMtd recheckMtd,

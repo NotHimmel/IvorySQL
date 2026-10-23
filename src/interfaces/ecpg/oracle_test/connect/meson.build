@@ -1,5 +1,5 @@
 # Copyright (c) 2022-2024, PostgreSQL Global Development Group
-# Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+# Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
 
 pgc_files = [
   'test1',
@@ -7,6 +7,7 @@ pgc_files = [
   'test3',
   'test4',
   'test5',
+  'test6',
 ]
 
 foreach pgc_file : pgc_files

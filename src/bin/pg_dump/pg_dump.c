@@ -6,7 +6,7 @@
  *
  * Portions Copyright (c) 1996-2025, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
- * Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+ * Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
  *
  *	pg_dump will read the system catalogs in a database and dump out a
  *	script that reproduces the schema in terms of SQL that is understood
@@ -118,6 +118,7 @@ typedef enum SeqType
 	SEQTYPE_SMALLINT,
 	SEQTYPE_INTEGER,
 	SEQTYPE_BIGINT,
+	SEQTYPE_CUSTINT,
 } SeqType;
 
 static const char *const SeqTypeNames[] =
@@ -125,9 +126,10 @@ static const char *const SeqTypeNames[] =
 	[SEQTYPE_SMALLINT] = "smallint",
 	[SEQTYPE_INTEGER] = "integer",
 	[SEQTYPE_BIGINT] = "bigint",
+	[SEQTYPE_CUSTINT] = "pg_catalog.int8",
 };
 
-StaticAssertDecl(lengthof(SeqTypeNames) == (SEQTYPE_BIGINT + 1),
+StaticAssertDecl(lengthof(SeqTypeNames) == (SEQTYPE_CUSTINT + 1),
 				 "array length mismatch");
 
 typedef struct
@@ -143,6 +145,7 @@ typedef struct
 	int16		flags;			/* ivorysql */
 	int64		last_value;		/* last value of sequence */
 	bool		is_called;		/* whether nextval advances before returning */
+	bool		null_seqtuple;	/* did pg_get_sequence_data return nulls? */
 } SequenceItem;
 
 typedef enum OidOptions
@@ -317,6 +320,8 @@ static void dumpTrigger(Archive *fout, const TriggerInfo *tginfo);
 static void dumpEventTrigger(Archive *fout, const EventTriggerInfo *evtinfo);
 static void dumpTable(Archive *fout, const TableInfo *tbinfo);
 static void dumpTableSchema(Archive *fout, const TableInfo *tbinfo);
+static void appendForceViewStmt(Archive *fout, PQExpBuffer q,
+								const TableInfo *tbinfo);
 static void dumpTableAttach(Archive *fout, const TableAttachInfo *attachinfo);
 static void dumpAttrDef(Archive *fout, const AttrDefInfo *adinfo);
 static void collectSequences(Archive *fout);
@@ -832,23 +837,30 @@ main(int argc, char **argv)
 
 	/* reject conflicting "-only" options */
 	if (data_only && schema_only)
-		pg_fatal("options -s/--schema-only and -a/--data-only cannot be used together");
+		pg_fatal("options %s and %s cannot be used together",
+				 "-s/--schema-only", "-a/--data-only");
 	if (schema_only && statistics_only)
-		pg_fatal("options -s/--schema-only and --statistics-only cannot be used together");
+		pg_fatal("options %s and %s cannot be used together",
+				 "-s/--schema-only", "--statistics-only");
 	if (data_only && statistics_only)
-		pg_fatal("options -a/--data-only and --statistics-only cannot be used together");
+		pg_fatal("options %s and %s cannot be used together",
+				 "-a/--data-only", "--statistics-only");
 
 	/* reject conflicting "-only" and "no-" options */
 	if (data_only && no_data)
-		pg_fatal("options -a/--data-only and --no-data cannot be used together");
+		pg_fatal("options %s and %s cannot be used together",
+				 "-a/--data-only", "--no-data");
 	if (schema_only && no_schema)
-		pg_fatal("options -s/--schema-only and --no-schema cannot be used together");
+		pg_fatal("options %s and %s cannot be used together",
+				 "-s/--schema-only", "--no-schema");
 	if (statistics_only && no_statistics)
-		pg_fatal("options --statistics-only and --no-statistics cannot be used together");
+		pg_fatal("options %s and %s cannot be used together",
+				 "--statistics-only", "--no-statistics");
 
 	/* reject conflicting "no-" options */
 	if (with_statistics && no_statistics)
-		pg_fatal("options --statistics and --no-statistics cannot be used together");
+		pg_fatal("options %s and %s cannot be used together",
+				 "--statistics", "--no-statistics");
 
 	/* reject conflicting "-only" options */
 	if (data_only && with_statistics)
@@ -859,16 +871,20 @@ main(int argc, char **argv)
 				 "-s/--schema-only", "--statistics");
 
 	if (schema_only && foreign_servers_include_patterns.head != NULL)
-		pg_fatal("options -s/--schema-only and --include-foreign-data cannot be used together");
+		pg_fatal("options %s and %s cannot be used together",
+				 "-s/--schema-only", "--include-foreign-data");
 
 	if (numWorkers > 1 && foreign_servers_include_patterns.head != NULL)
-		pg_fatal("option --include-foreign-data is not supported with parallel backup");
+		pg_fatal("option %s is not supported with parallel backup",
+				 "--include-foreign-data");
 
 	if (data_only && dopt.outputClean)
-		pg_fatal("options -c/--clean and -a/--data-only cannot be used together");
+		pg_fatal("options %s and %s cannot be used together",
+				 "-c/--clean", "-a/--data-only");
 
 	if (dopt.if_exists && !dopt.outputClean)
-		pg_fatal("option --if-exists requires option -c/--clean");
+		pg_fatal("option %s requires option %s",
+				 "--if-exists", "-c/--clean");
 
 	/*
 	 * Set derivative flags. Ambiguous or nonsensical combinations, e.g.
@@ -888,7 +904,9 @@ main(int argc, char **argv)
 	 * --rows-per-insert were specified.
 	 */
 	if (dopt.do_nothing && dopt.dump_inserts == 0)
-		pg_fatal("option --on-conflict-do-nothing requires option --inserts, --rows-per-insert, or --column-inserts");
+		pg_fatal("option %s requires option %s, %s, or %s",
+				 "--on-conflict-do-nothing",
+				 "--inserts", "--rows-per-insert", "--column-inserts");
 
 	/* Identify archive format to emit */
 	archiveFormat = parseArchiveFormat(format, &archiveMode);
@@ -909,7 +927,8 @@ main(int argc, char **argv)
 			pg_fatal("invalid restrict key");
 	}
 	else if (dopt.restrict_key)
-		pg_fatal("option --restrict-key can only be used with --format=plain");
+		pg_fatal("option %s can only be used with %s",
+				 "--restrict-key", "--format=plain");
 
 	/*
 	 * Custom and directory formats are compressed by default with gzip when
@@ -5230,15 +5249,15 @@ getSubscriptionTables(Archive *fout)
 		subrinfo[i].dobj.catId.tableoid = relid;
 		subrinfo[i].dobj.catId.oid = cur_srsubid;
 		AssignDumpId(&subrinfo[i].dobj);
-		subrinfo[i].dobj.name = pg_strdup(subinfo->dobj.name);
+		subrinfo[i].dobj.namespace = tblinfo->dobj.namespace;
+		subrinfo[i].dobj.name = tblinfo->dobj.name;
+		subrinfo[i].subinfo = subinfo;
 		subrinfo[i].tblinfo = tblinfo;
 		subrinfo[i].srsubstate = PQgetvalue(res, i, i_srsubstate)[0];
 		if (PQgetisnull(res, i, i_srsublsn))
 			subrinfo[i].srsublsn = NULL;
 		else
 			subrinfo[i].srsublsn = pg_strdup(PQgetvalue(res, i, i_srsublsn));
-
-		subrinfo[i].subinfo = subinfo;
 
 		/* Decide whether we want to dump it */
 		selectDumpableObject(&(subrinfo[i].dobj), fout);
@@ -5267,7 +5286,7 @@ dumpSubscriptionTable(Archive *fout, const SubRelInfo *subrinfo)
 
 	Assert(fout->dopt->binary_upgrade && fout->remoteVersion >= 170000);
 
-	tag = psprintf("%s %s", subinfo->dobj.name, subrinfo->dobj.name);
+	tag = psprintf("%s %s", subinfo->dobj.name, subrinfo->tblinfo->dobj.name);
 
 	query = createPQExpBuffer();
 
@@ -5282,7 +5301,7 @@ dumpSubscriptionTable(Archive *fout, const SubRelInfo *subrinfo)
 							 "\n-- For binary upgrade, must preserve the subscriber table.\n");
 		appendPQExpBufferStr(query,
 							 "SELECT pg_catalog.binary_upgrade_add_sub_rel_state(");
-		appendStringLiteralAH(query, subrinfo->dobj.name, fout);
+		appendStringLiteralAH(query, subinfo->dobj.name, fout);
 		appendPQExpBuffer(query,
 						  ", %u, '%c'",
 						  subrinfo->tblinfo->dobj.catId.oid,
@@ -6721,12 +6740,8 @@ getAggregates(Archive *fout)
 		if (agginfo[i].aggfn.nargs == 0)
 			agginfo[i].aggfn.argtypes = NULL;
 		else
-		{
-			agginfo[i].aggfn.argtypes = (Oid *) pg_malloc(agginfo[i].aggfn.nargs * sizeof(Oid));
-			parseOidArray(PQgetvalue(res, i, i_proargtypes),
-						  agginfo[i].aggfn.argtypes,
-						  agginfo[i].aggfn.nargs);
-		}
+			agginfo[i].aggfn.argtypes = parseOidArray(PQgetvalue(res, i, i_proargtypes),
+													  agginfo[i].aggfn.nargs);
 		agginfo[i].aggfn.postponed_def = false; /* might get set during sort */
 
 		/* Decide whether we want to dump it */
@@ -6914,11 +6929,8 @@ getFuncs(Archive *fout)
 		if (finfo[i].nargs == 0)
 			finfo[i].argtypes = NULL;
 		else
-		{
-			finfo[i].argtypes = (Oid *) pg_malloc(finfo[i].nargs * sizeof(Oid));
-			parseOidArray(PQgetvalue(res, i, i_proargtypes),
-						  finfo[i].argtypes, finfo[i].nargs);
-		}
+			finfo[i].argtypes = parseOidArray(PQgetvalue(res, i, i_proargtypes),
+											  finfo[i].nargs);
 		finfo[i].postponed_def = false; /* might get set during sort */
 
 		/* Decide whether we want to dump it */
@@ -6956,6 +6968,28 @@ getPackages(Archive *fout, int *numPkgs)
 	int			i_rolname;
 	int			i_pkgacl;
 	int			i_acldefault;
+
+
+	/*
+	 * Check if pg_package table exists. This is needed for pg_upgrade from
+	 * PostgreSQL to IvorySQL, where the source database is PostgreSQL which
+	 * doesn't have pg_package table.
+	 */
+	res = ExecuteSqlQuery(fout,
+						  "SELECT 1 FROM pg_catalog.pg_class c "
+						  "JOIN pg_catalog.pg_namespace n ON c.relnamespace = n.oid "
+						  "WHERE n.nspname = 'pg_catalog' AND c.relname = 'pg_package'",
+						  PGRES_TUPLES_OK);
+	if (PQntuples(res) == 0)
+	{
+		/* pg_package table doesn't exist, return empty result */
+		PQclear(res);
+		destroyPQExpBuffer(query);
+		*numPkgs = 0;
+		return (PkgInfo *) pg_malloc0(sizeof(PkgInfo));
+	}
+	PQclear(res);
+
 	appendPQExpBuffer(query,
 					"SELECT p.tableoid, p.pkgname, p.oid, p.pkgnamespace,"
 					"p.pkgowner,"
@@ -7124,6 +7158,7 @@ getTables(Archive *fout, int *numTables)
 	int			i_reltablespace;
 	int			i_relhasoids;
 	int			i_relhasrowid;
+	int			i_forceview_case;
 	int			i_relhastriggers;
 	int			i_relpersistence;
 	int			i_relispopulated;
@@ -7193,12 +7228,51 @@ getTables(Archive *fout, int *numTables)
 						 "d.refobjsubid AS owning_col, "
 						 "tsp.spcname AS reltablespace, ");
 
-	if (fout->remoteVersion < 170000)
-		appendPQExpBufferStr(query,
-							 "false AS relhasrowid, ");
-	else
-		appendPQExpBufferStr(query,
-							 "c.relhasrowid, ");
+	/*
+	 * Check if relhasrowid column exists. This column is IvorySQL-specific
+	 * for Oracle ROWID compatibility, and doesn't exist in native PostgreSQL.
+	 * We need to check at runtime rather than relying on remoteVersion because
+	 * when upgrading from PostgreSQL to IvorySQL, the source database is
+	 * PostgreSQL which may have the same version number but lacks this column.
+	 */
+	{
+		PGresult   *res_rowid;
+		bool		relhasrowid_exists = false;
+
+		res_rowid = ExecuteSqlQuery(fout,
+							  "SELECT 1 FROM pg_catalog.pg_attribute "
+							  "WHERE attrelid = 'pg_class'::regclass "
+							  "AND attname = 'relhasrowid' "
+							  "AND attnum > 0 LIMIT 1",
+							  PGRES_TUPLES_OK);
+		relhasrowid_exists = (PQntuples(res_rowid) > 0);
+		PQclear(res_rowid);
+
+		if (relhasrowid_exists)
+			appendPQExpBufferStr(query, "c.relhasrowid, ");
+		else
+			appendPQExpBufferStr(query, "false AS relhasrowid, ");
+	}
+
+	/* Older IvorySQL and PostgreSQL servers may not have this catalog. */
+	{
+		PGresult   *res_force;
+		bool		has_force_views;
+
+		res_force = ExecuteSqlQueryForSingleRow(fout,
+			"SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_class c "
+			"JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "
+			"WHERE n.nspname = 'pg_catalog' AND c.relname = 'pg_force_view')");
+		has_force_views = strcmp(PQgetvalue(res_force, 0, 0), "t") == 0;
+		PQclear(res_force);
+
+		if (has_force_views)
+			appendPQExpBufferStr(query,
+				"(SELECT ident_case FROM pg_catalog.pg_force_view "
+				"WHERE fvoid = c.oid) AS forceview_case, ");
+		else
+			appendPQExpBufferStr(query, "NULL AS forceview_case, ");
+	}
 
 	if (fout->remoteVersion >= 120000)
 		appendPQExpBufferStr(query,
@@ -7356,6 +7430,7 @@ getTables(Archive *fout, int *numTables)
 	i_reltablespace = PQfnumber(res, "reltablespace");
 	i_relhasoids = PQfnumber(res, "relhasoids");
 	i_relhasrowid = PQfnumber(res, "relhasrowid");
+	i_forceview_case = PQfnumber(res, "forceview_case");
 	i_relhastriggers = PQfnumber(res, "relhastriggers");
 	i_relpersistence = PQfnumber(res, "relpersistence");
 	i_relispopulated = PQfnumber(res, "relispopulated");
@@ -7417,6 +7492,7 @@ getTables(Archive *fout, int *numTables)
 		tblinfo[i].ncheck = atoi(PQgetvalue(res, i, i_relchecks));
 		tblinfo[i].hasindex = (strcmp(PQgetvalue(res, i, i_relhasindex), "t") == 0);
 		tblinfo[i].relhasrowid = (strcmp(PQgetvalue(res, i, i_relhasrowid), "t") == 0);
+		tblinfo[i].forceview_case = *PQgetvalue(res, i, i_forceview_case);
 		tblinfo[i].hasrules = (strcmp(PQgetvalue(res, i, i_relhasrules), "t") == 0);
 		tblinfo[i].relpages = atoi(PQgetvalue(res, i, i_relpages));
 		if (PQgetisnull(res, i, i_toastpages))
@@ -7991,8 +8067,6 @@ getIndexes(Archive *fout, TableInfo tblinfo[], int numTables)
 	{
 		Oid			indrelid = atooid(PQgetvalue(res, j, i_indrelid));
 		TableInfo  *tbinfo = NULL;
-		char	  **indAttNames = NULL;
-		int			nindAttNames = 0;
 		int			numinds;
 
 		/* Count rows for this table */
@@ -8026,6 +8100,8 @@ getIndexes(Archive *fout, TableInfo tblinfo[], int numTables)
 		{
 			char		contype;
 			char		indexkind;
+			char	  **indAttNames = NULL;
+			int			nindAttNames = 0;
 			RelStatsInfo *relstats;
 			int32		relpages = atoi(PQgetvalue(res, j, i_relpages));
 			int32		relallvisible = atoi(PQgetvalue(res, j, i_relallvisible));
@@ -8046,9 +8122,8 @@ getIndexes(Archive *fout, TableInfo tblinfo[], int numTables)
 			indxinfo[j].indreloptions = pg_strdup(PQgetvalue(res, j, i_indreloptions));
 			indxinfo[j].indstatcols = pg_strdup(PQgetvalue(res, j, i_indstatcols));
 			indxinfo[j].indstatvals = pg_strdup(PQgetvalue(res, j, i_indstatvals));
-			indxinfo[j].indkeys = (Oid *) pg_malloc(indxinfo[j].indnattrs * sizeof(Oid));
-			parseOidArray(PQgetvalue(res, j, i_indkey),
-						  indxinfo[j].indkeys, indxinfo[j].indnattrs);
+			indxinfo[j].indkeys = parseIntArray(PQgetvalue(res, j, i_indkey),
+												indxinfo[j].indnattrs);
 			indxinfo[j].indisclustered = (PQgetvalue(res, j, i_indisclustered)[0] == 't');
 			indxinfo[j].indisreplident = (PQgetvalue(res, j, i_indisreplident)[0] == 't');
 			indxinfo[j].indnullsnotdistinct = (PQgetvalue(res, j, i_indnullsnotdistinct)[0] == 't');
@@ -9278,8 +9353,7 @@ getTableAttrs(Archive *fout, TableInfo *tblinfo, int numTables)
 	 *
 	 * We track in notnull_islocal whether the constraint was defined directly
 	 * in this table or via an ancestor, for binary upgrade.  flagInhAttrs
-	 * might modify this later; that routine is also in charge of determining
-	 * the correct inhcount.
+	 * might modify this later.
 	 */
 	if (fout->remoteVersion >= 180000)
 		appendPQExpBufferStr(q,
@@ -9296,7 +9370,10 @@ getTableAttrs(Archive *fout, TableInfo *tblinfo, int numTables)
 							 "NULL AS notnull_comment,\n"
 							 "NULL AS notnull_invalidoid,\n"
 							 "false AS notnull_noinherit,\n"
-							 "a.attislocal AS notnull_islocal,\n");
+							 "CASE WHEN a.attislocal THEN true\n"
+							 "     WHEN a.attnotnull AND NOT a.attislocal THEN true\n"
+							 "     ELSE false\n"
+							 "END AS notnull_islocal,\n");
 
 	if (fout->remoteVersion >= 140000)
 		appendPQExpBufferStr(q,
@@ -9305,13 +9382,31 @@ getTableAttrs(Archive *fout, TableInfo *tblinfo, int numTables)
 		appendPQExpBufferStr(q,
 							 "'' AS attcompression,\n");
 	
-	if (fout->remoteVersion >= 170000)
-		appendPQExpBuffer(q,
-						"a.attisinvisible,\n");
-	else
-		appendPQExpBuffer(q,
-							"'f' AS attisinvisible,\n");
+	/*
+	 * Check if attisinvisible column exists. This column is IvorySQL-specific
+	 * for Oracle compatibility, and doesn't exist in native PostgreSQL.
+	 * We need to check at runtime rather than relying on remoteVersion because
+	 * when upgrading from PostgreSQL to IvorySQL, the source database is
+	 * PostgreSQL which may have the same version number but lacks this column.
+	 */
+	{
+		PGresult   *res_invisible;
+		bool		attisinvisible_exists = false;
 
+		res_invisible = ExecuteSqlQuery(fout,
+							  "SELECT 1 FROM pg_catalog.pg_attribute "
+							  "WHERE attrelid = 'pg_attribute'::regclass "
+							  "AND attname = 'attisinvisible' "
+							  "AND attnum > 0 LIMIT 1",
+							  PGRES_TUPLES_OK);
+		attisinvisible_exists = (PQntuples(res_invisible) > 0);
+		PQclear(res_invisible);
+
+		if (attisinvisible_exists)
+			appendPQExpBufferStr(q, "a.attisinvisible,\n");
+		else
+			appendPQExpBufferStr(q, "'f' AS attisinvisible,\n");
+	}
 
 	if (fout->remoteVersion >= 100000)
 		appendPQExpBufferStr(q,
@@ -10009,7 +10104,7 @@ determineNotNullFlags(Archive *fout, PGresult *res, int r,
 			 */
 			if ((dopt->binary_upgrade &&
 				 !tbinfo->ispartition &&
-				 !tbinfo->notnull_islocal) ||
+				 !tbinfo->notnull_islocal[j]) ||
 				!PQgetisnull(res, r, i_notnull_comment))
 			{
 				tbinfo->notnull_constrs[j] =
@@ -13726,12 +13821,10 @@ dumpFunc(Archive *fout, const FuncInfo *finfo)
 
 	if (*protrftypes)
 	{
-		Oid		   *typeids = pg_malloc(FUNC_MAX_ARGS * sizeof(Oid));
-		int			i;
+		Oid		   *typeids = parseOidArray(protrftypes, -1);
 
 		appendPQExpBufferStr(q, " TRANSFORM ");
-		parseOidArray(protrftypes, typeids, FUNC_MAX_ARGS);
-		for (i = 0; typeids[i]; i++)
+		for (int i = 0; typeids[i]; i++)
 		{
 			if (i != 0)
 				appendPQExpBufferStr(q, ", ");
@@ -17039,6 +17132,76 @@ dumpTable(Archive *fout, const TableInfo *tbinfo)
 }
 
 /*
+ * An invalid FORCE VIEW has no _RETURN rule.  Its catalog entry contains a
+ * complete CREATE statement, not the SELECT returned for an ordinary view.
+ * Execute it with the original identifier case and the view's schema first
+ * in search_path.  Dynamic SQL is necessary because an archive entry is parsed
+ * as a single command string, before any SET commands in it take effect.
+ * Save and restore all settings, including for --single-transaction restores.
+ */
+static void
+appendForceViewStmt(Archive *fout, PQExpBuffer q, const TableInfo *tbinfo)
+{
+	PQExpBuffer query = createPQExpBuffer();
+	PQExpBuffer body = createPQExpBuffer();
+	PGresult   *res;
+	const char *ident_case;
+
+	switch (tbinfo->forceview_case)
+	{
+		case 'n':
+		case 'u':				/* definition generated by the server */
+			ident_case = "normal";
+			break;
+		case 'i':
+			ident_case = "interchange";
+			break;
+		case 'l':
+			ident_case = "lowercase";
+			break;
+		default:
+			pg_fatal("unrecognized identifier case for force view \"%s\"",
+					 tbinfo->dobj.name);
+	}
+
+	appendPQExpBuffer(query,
+		"SELECT source FROM pg_catalog.pg_force_view WHERE fvoid = '%u'::pg_catalog.oid",
+		tbinfo->dobj.catId.oid);
+	res = ExecuteSqlQueryForSingleRow(fout, query->data);
+	if (PQgetisnull(res, 0, 0) || PQgetlength(res, 0, 0) == 0)
+		pg_fatal("definition of force view \"%s\" appears to be empty",
+				 tbinfo->dobj.name);
+
+	appendPQExpBufferStr(body,
+		"DECLARE\n"
+		"    saved_path text := pg_catalog.current_setting('search_path');\n"
+		"    saved_case text := pg_catalog.current_setting('ivorysql.identifier_case_switch');\n"
+		"    saved_mode text := pg_catalog.current_setting('ivorysql.compatible_mode');\n"
+		"BEGIN\n"
+		"    PERFORM pg_catalog.set_config('ivorysql.compatible_mode', 'oracle', true);\n"
+		"    PERFORM pg_catalog.set_config('search_path', pg_catalog.concat(");
+	appendStringLiteralAH(body, fmtId(tbinfo->dobj.namespace->dobj.name), fout);
+	appendPQExpBufferStr(body,
+		", CASE WHEN pg_catalog.length(saved_path) > 0 THEN ', ' || saved_path END), true);\n"
+		"    PERFORM pg_catalog.set_config('ivorysql.identifier_case_switch', ");
+	appendStringLiteralAH(body, ident_case, fout);
+	appendPQExpBufferStr(body, ", true);\n    EXECUTE ");
+	appendStringLiteralAH(body, PQgetvalue(res, 0, 0), fout);
+	appendPQExpBufferStr(body, ";\n"
+		"    PERFORM pg_catalog.set_config('ivorysql.identifier_case_switch', saved_case, true);\n"
+		"    PERFORM pg_catalog.set_config('search_path', saved_path, true);\n"
+		"    PERFORM pg_catalog.set_config('ivorysql.compatible_mode', saved_mode, true);\n"
+		"END;");
+	appendPQExpBufferStr(q, "DO ");
+	appendStringLiteralAH(q, body->data, fout);
+	appendPQExpBufferStr(q, " LANGUAGE plpgsql;\n");
+
+	PQclear(res);
+	destroyPQExpBuffer(query);
+	destroyPQExpBuffer(body);
+}
+
+/*
  * Create the AS clause for a view or materialized view. The semicolon is
  * stripped because a materialized view must add a WITH NO DATA clause.
  *
@@ -17181,26 +17344,31 @@ dumpTableSchema(Archive *fout, const TableInfo *tbinfo)
 			binary_upgrade_set_pg_class_oids(fout, q,
 											 tbinfo->dobj.catId.oid);
 
-		appendPQExpBuffer(q, "CREATE VIEW %s", qualrelname);
-
-		if (tbinfo->dummy_view)
-			result = createDummyViewAsClause(fout, tbinfo);
+		if (tbinfo->forceview_case)
+			appendForceViewStmt(fout, q, tbinfo);
 		else
 		{
-			if (nonemptyReloptions(tbinfo->reloptions))
-			{
-				appendPQExpBufferStr(q, " WITH (");
-				appendReloptionsArrayAH(q, tbinfo->reloptions, "", fout);
-				appendPQExpBufferChar(q, ')');
-			}
-			result = createViewAsClause(fout, tbinfo);
-		}
-		appendPQExpBuffer(q, " AS\n%s", result->data);
-		destroyPQExpBuffer(result);
+			appendPQExpBuffer(q, "CREATE VIEW %s", qualrelname);
 
-		if (tbinfo->checkoption != NULL && !tbinfo->dummy_view)
-			appendPQExpBuffer(q, "\n  WITH %s CHECK OPTION", tbinfo->checkoption);
-		appendPQExpBufferStr(q, ";\n");
+			if (tbinfo->dummy_view)
+				result = createDummyViewAsClause(fout, tbinfo);
+			else
+			{
+				if (nonemptyReloptions(tbinfo->reloptions))
+				{
+					appendPQExpBufferStr(q, " WITH (");
+					appendReloptionsArrayAH(q, tbinfo->reloptions, "", fout);
+					appendPQExpBufferChar(q, ')');
+				}
+				result = createViewAsClause(fout, tbinfo);
+			}
+			appendPQExpBuffer(q, " AS\n%s", result->data);
+			destroyPQExpBuffer(result);
+
+			if (tbinfo->checkoption != NULL && !tbinfo->dummy_view)
+				appendPQExpBuffer(q, "\n  WITH %s CHECK OPTION", tbinfo->checkoption);
+			appendPQExpBufferStr(q, ";\n");
+		}
 	}
 	else
 	{
@@ -17461,6 +17629,9 @@ dumpTableSchema(Archive *fout, const TableInfo *tbinfo)
 						appendPQExpBuffer(q, "CONSTRAINT %s NOT NULL %s",
 										  tbinfo->notnull_constrs[j],
 										  fmtId(tbinfo->attnames[j]));
+
+					if (tbinfo->notnull_noinh[j])
+						appendPQExpBufferStr(q, " NO INHERIT");
 				}
 			}
 
@@ -18655,7 +18826,7 @@ dumpConstraint(Archive *fout, const ConstraintInfo *coninfo)
 			appendPQExpBufferStr(q, " (");
 			for (k = 0; k < indxinfo->indnkeyattrs; k++)
 			{
-				int			indkey = (int) indxinfo->indkeys[k];
+				int			indkey = indxinfo->indkeys[k];
 				const char *attname;
 
 				if (indkey == InvalidAttrNumber)
@@ -18674,7 +18845,7 @@ dumpConstraint(Archive *fout, const ConstraintInfo *coninfo)
 
 			for (k = indxinfo->indnkeyattrs; k < indxinfo->indnattrs; k++)
 			{
-				int			indkey = (int) indxinfo->indkeys[k];
+				int			indkey = indxinfo->indkeys[k];
 				const char *attname;
 
 				if (indkey == InvalidAttrNumber)
@@ -19019,6 +19190,7 @@ collectSequences(Archive *fout)
 		sequences[i].flags = atoi(PQgetvalue(res, 0, 7));
 		sequences[i].last_value = strtoi64(PQgetvalue(res, i, 8), NULL, 10);
 		sequences[i].is_called = (strcmp(PQgetvalue(res, i, 9), "t") == 0);
+		sequences[i].null_seqtuple = (PQgetisnull(res, i, 8) || PQgetisnull(res, i, 9));
 	}
 
 	PQclear(res);
@@ -19120,7 +19292,7 @@ dumpSequence(Archive *fout, const TableInfo *tbinfo)
 		default_minv = is_ascending ? 1 : PG_INT64_MIN;
 		default_maxv = is_ascending ? PG_INT64_MAX : -1;
 	}
-	else if (db_mode == DB_PG)
+	else
 	{
 		pg_fatal("unrecognized sequence type: %d", seq->seqtype);
 		default_minv = default_maxv = 0;	/* keep compiler quiet */
@@ -19341,7 +19513,13 @@ dumpSequenceData(Archive *fout, const TableDataInfo *tdinfo)
 	TableInfo  *tbinfo = tdinfo->tdtable;
 	int64		last;
 	bool		called;
-	PQExpBuffer query = createPQExpBuffer();
+	PQExpBuffer query;
+
+	/* needn't bother if not dumping sequence data */
+	if (!fout->dopt->dumpData && !fout->dopt->sequence_data)
+		return;
+
+	query = createPQExpBuffer();
 
 	/*
 	 * For versions >= 18, the sequence information is gathered in the sorted
@@ -19383,6 +19561,12 @@ dumpSequenceData(Archive *fout, const TableDataInfo *tdinfo)
 		key.oid = tbinfo->dobj.catId.oid;
 		entry = bsearch(&key, sequences, nsequences,
 						sizeof(SequenceItem), SequenceItemCmp);
+
+		if (entry->null_seqtuple)
+			pg_fatal("failed to get data for sequence \"%s\"; user may lack "
+					 "SELECT privilege on the sequence or the sequence may "
+					 "have been concurrently dropped",
+					 tbinfo->dobj.name);
 
 		last = entry->last_value;
 		called = entry->is_called;

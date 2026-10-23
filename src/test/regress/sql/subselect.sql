@@ -340,6 +340,17 @@ select * from (
   where not exists (select 1 from tenk1 as b where b.unique2 = 10000)
 ) ss;
 
+
+--
+-- Test cases for interactions between PARAM_EXEC, subplans and array
+-- subscripts
+--
+
+-- check that array subscription doesn't conflict with PARAM_EXEC (see #19370)
+SELECT (array[1,2])[(SELECT g.i)] FROM generate_series(1, 1) g(i);
+SELECT (array[1,2])[(SELECT g.i):(SELECT g.i + 1)] FROM generate_series(1, 1) g(i);
+
+
 --
 -- Test that an IN implemented using a UniquePath does unique-ification
 -- with the right semantics, as per bug #4113.  (Unfortunately we have
@@ -872,7 +883,152 @@ select * from
   (select 9 as x, unnest(array[1,2,3,11,12,13]) as u) ss
   where tattle(x, u);
 
+--
+-- check that an upper-level qual is not pushed down if it references a grouped
+-- Var whose underlying expression contains SRFs
+--
+explain (verbose, costs off)
+select * from
+  (select generate_series(1, ten) as g, count(*) from tenk1 group by 1) ss
+  where ss.g = 1;
+
+select * from
+  (select generate_series(1, ten) as g, count(*) from tenk1 group by 1) ss
+  where ss.g = 1;
+
+--
+-- check that an upper-level qual is not pushed down if it references a grouped
+-- Var whose underlying expression contains volatile functions
+--
+alter function tattle(x int, y int) volatile;
+
+explain (verbose, costs off)
+select * from
+  (select tattle(3, ten) as v, count(*) from tenk1 where unique1 < 3 group by 1) ss
+  where ss.v;
+
+select * from
+  (select tattle(3, ten) as v, count(*) from tenk1 where unique1 < 3 group by 1) ss
+  where ss.v;
+
+-- if we pretend it's stable, we get different results:
+alter function tattle(x int, y int) stable;
+
+explain (verbose, costs off)
+select * from
+  (select tattle(3, ten) as v, count(*) from tenk1 where unique1 < 3 group by 1) ss
+  where ss.v;
+
+select * from
+  (select tattle(3, ten) as v, count(*) from tenk1 where unique1 < 3 group by 1) ss
+  where ss.v;
+
 drop function tattle(x int, y int);
+
+--
+-- check that an upper-level qual is not pushed down if its operator is from a
+-- different btree opfamily than the subquery's grouping eqop
+--
+BEGIN;
+
+CREATE TYPE t_rec AS (x numeric);
+CREATE TEMP TABLE pdt (id int, a t_rec);
+INSERT INTO pdt VALUES
+  (1, ROW(1.00)::t_rec),
+  (2, ROW(1.0)::t_rec),
+  (3, ROW(2)::t_rec);
+
+-- DISTINCT ON: conflict, qual stays in outer query
+EXPLAIN (COSTS OFF)
+SELECT * FROM (SELECT DISTINCT ON (a) id, a FROM pdt ORDER BY a, id) s
+WHERE a *= ROW(1.0)::t_rec;
+
+SELECT * FROM (SELECT DISTINCT ON (a) id, a FROM pdt ORDER BY a, id) s
+WHERE a *= ROW(1.0)::t_rec;
+
+-- Window function PARTITION BY: conflict, qual stays outside the WindowAgg
+EXPLAIN (COSTS OFF)
+SELECT * FROM (
+  SELECT id, a, count(*) OVER (PARTITION BY a) AS cnt FROM pdt
+) s
+WHERE a *= ROW(1.0)::t_rec;
+
+SELECT * FROM (
+  SELECT id, a, count(*) OVER (PARTITION BY a) AS cnt FROM pdt
+) s
+WHERE a *= ROW(1.0)::t_rec;
+
+-- Plain DISTINCT: conflict, qual stays in outer query
+EXPLAIN (COSTS OFF)
+SELECT * FROM (SELECT DISTINCT a FROM pdt) s WHERE a *= ROW(1.0)::t_rec;
+
+SELECT * FROM (SELECT DISTINCT a FROM pdt) s WHERE a *= ROW(1.0)::t_rec;
+
+-- Positive: compatible opfamily, safe to push past the grouping
+EXPLAIN (COSTS OFF)
+SELECT * FROM (SELECT DISTINCT ON (a) id, a FROM pdt ORDER BY a, id) s
+WHERE a = ROW(1.0)::t_rec;
+
+SELECT * FROM (SELECT DISTINCT ON (a) id, a FROM pdt ORDER BY a, id) s
+WHERE a = ROW(1.0)::t_rec;
+
+-- Set operations: any operation other than UNION ALL groups rows by equality,
+-- so the same opfamily-mismatch rules apply.
+CREATE TEMP TABLE u1 (a t_rec);
+CREATE TEMP TABLE u2 (a t_rec);
+INSERT INTO u1 VALUES (ROW(1.00)::t_rec), (ROW(1.0)::t_rec);
+INSERT INTO u2 VALUES (ROW(1.0)::t_rec);
+
+-- UNION: conflict, qual stays in outer query
+EXPLAIN (COSTS OFF)
+SELECT * FROM (SELECT a FROM u1 UNION SELECT a FROM u2) s
+WHERE a *= ROW(1.0)::t_rec;
+
+SELECT * FROM (SELECT a FROM u1 UNION SELECT a FROM u2) s
+WHERE a *= ROW(1.0)::t_rec;
+
+-- INTERSECT: same
+EXPLAIN (COSTS OFF)
+SELECT * FROM (SELECT a FROM u1 INTERSECT SELECT a FROM u2) s
+WHERE a *= ROW(1.0)::t_rec;
+
+SELECT * FROM (SELECT a FROM u1 INTERSECT SELECT a FROM u2) s
+WHERE a *= ROW(1.0)::t_rec;
+
+-- INTERSECT ALL: still groups
+EXPLAIN (COSTS OFF)
+SELECT * FROM (SELECT a FROM u1 INTERSECT ALL SELECT a FROM u2) s
+WHERE a *= ROW(1.0)::t_rec;
+
+SELECT * FROM (SELECT a FROM u1 INTERSECT ALL SELECT a FROM u2) s
+WHERE a *= ROW(1.0)::t_rec;
+
+-- UNION ALL of (UNION ...): an inner grouping node still exposes the
+-- conflict to a qual pushed down through the outer UNION ALL.
+EXPLAIN (COSTS OFF)
+SELECT * FROM (
+  (SELECT a FROM u1 UNION SELECT a FROM u2)
+  UNION ALL
+  SELECT a FROM u2
+) s
+WHERE a *= ROW(1.0)::t_rec;
+
+SELECT * FROM (
+  (SELECT a FROM u1 UNION SELECT a FROM u2)
+  UNION ALL
+  SELECT a FROM u2
+) s
+WHERE a *= ROW(1.0)::t_rec;
+
+-- UNION ALL only: no grouping anywhere, pushdown remains allowed.
+EXPLAIN (COSTS OFF)
+SELECT * FROM (SELECT a FROM u1 UNION ALL SELECT a FROM u2) s
+WHERE a *= ROW(1.0)::t_rec;
+
+SELECT * FROM (SELECT a FROM u1 UNION ALL SELECT a FROM u2) s
+WHERE a *= ROW(1.0)::t_rec;
+
+ROLLBACK;
 
 --
 -- Test that LIMIT can be pushed to SORT through a subquery that just projects

@@ -4,7 +4,7 @@
  * regular expressions
  *
  * Copyright (c) 1998, 1999 Henry Spencer.  All rights reserved.
- * Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+ * Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
  *
  * Development of this software was funded, in part, by Cray Research Inc.,
  * UUNET Communications Services Inc., Sun Microsystems Inc., and Scriptics
@@ -80,6 +80,7 @@
 #undef REG_DUMP
 #undef REG_FAKE
 #undef REG_PROGRESS
+#undef REG_NLDOT
 #undef REG_NOTBOL
 #undef REG_NOTEOL
 #undef REG_STARTEND
@@ -196,6 +197,7 @@ typedef struct
 #define REG_DUMP	004000		/* none of your business :-) */
 #define REG_FAKE	010000		/* none of your business :-) */
 #define REG_PROGRESS	020000	/* none of your business :-) */
+#define REG_NLDOT	040000		/* \n doesn't match . */
 
 
 

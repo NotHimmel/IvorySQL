@@ -3,7 +3,7 @@
  *
  *	database server functions
  *
- * Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+ * Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
  *	Copyright (c) 2010-2025, PostgreSQL Global Development Group
  *	src/bin/pg_upgrade/server.c
  */
@@ -75,6 +75,8 @@ get_db_conn(ClusterInfo *cluster, const char *db_name)
 		appendPQExpBufferStr(&conn_opts, " host=");
 		appendConnStrVal(&conn_opts, cluster->sockdir);
 	}
+	if (!protocol_negotiation_supported(cluster))
+		appendPQExpBufferStr(&conn_opts, " max_protocol_version=3.0");
 
 	conn = PQconnectdb(conn_opts.data);
 	termPQExpBuffer(&conn_opts);

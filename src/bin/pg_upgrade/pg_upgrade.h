@@ -1,7 +1,7 @@
 /*
  *	pg_upgrade.h
  *
- * Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+ * Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
  *	Copyright (c) 2010-2025, PostgreSQL Global Development Group
  *	src/bin/pg_upgrade/pg_upgrade.h
  */
@@ -499,6 +499,7 @@ unsigned int str2uint(const char *str);
 /* version.c */
 
 bool		jsonb_9_4_check_applicable(ClusterInfo *cluster);
+bool		protocol_negotiation_supported(const ClusterInfo *cluster);
 void		old_9_6_invalidate_hash_indexes(ClusterInfo *cluster,
 											bool check_mode);
 

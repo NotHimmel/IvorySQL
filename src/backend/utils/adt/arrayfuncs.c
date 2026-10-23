@@ -465,7 +465,7 @@ ReadArrayDimensions(char **srcptr, int *ndim_p, int *dim, int *lBound,
 			if (!ReadDimensionInt(&p, &ub, origStr, escontext))
 				return false;
 			if (p == q)			/* no digits? */
-				return(escontext, false, 
+				ereturn(escontext, false, 
 						(errcode(ERRCODE_INVALID_TEXT_REPRESENTATION),
 						 errmsg("malformed array literal: \"%s\"", origStr),
 						 errdetail("Missing array dimension value.")));
@@ -3748,6 +3748,12 @@ deconstruct_array_builtin(ArrayType *array,
 			elmalign = TYPALIGN_SHORT;
 			break;
 
+		case INT4OID:
+			elmlen = sizeof(int32);
+			elmbyval = true;
+			elmalign = TYPALIGN_INT;
+			break;
+
 		case OIDOID:
 			elmlen = sizeof(Oid);
 			elmbyval = true;
@@ -5581,6 +5587,7 @@ accumArrayResultArr(ArrayBuildStateArr *astate,
 				ndatabytes;
 	char	   *data;
 	int			i;
+	int			newnitems;
 
 	/*
 	 * We disallow accumulating null subarrays.  Another plausible definition
@@ -5609,6 +5616,14 @@ accumArrayResultArr(ArrayBuildStateArr *astate,
 	data = ARR_DATA_PTR(arg);
 	nitems = ArrayGetNItems(ndims, dims);
 	ndatabytes = ARR_SIZE(arg) - ARR_DATA_OFFSET(arg);
+
+	/* Check that the array doesn't grow too large */
+	newnitems = astate->nitems + nitems;
+	if (newnitems > MaxArraySize)
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("array size exceeds the maximum allowed (%zu)",
+						MaxArraySize)));
 
 	if (astate->ndims == 0)
 	{
@@ -5675,8 +5690,6 @@ accumArrayResultArr(ArrayBuildStateArr *astate,
 	/* Deal with null bitmap if needed */
 	if (astate->nullbitmap || ARR_HASNULL(arg))
 	{
-		int			newnitems = astate->nitems + nitems;
-
 		if (astate->nullbitmap == NULL)
 		{
 			/*
@@ -5700,7 +5713,7 @@ accumArrayResultArr(ArrayBuildStateArr *astate,
 						  nitems);
 	}
 
-	astate->nitems += nitems;
+	astate->nitems = newnitems;
 	astate->dims[0] += 1;
 
 	MemoryContextSwitchTo(oldcontext);

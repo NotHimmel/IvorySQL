@@ -6,7 +6,7 @@
  *
  * Portions Copyright (c) 1996-2025, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
- * Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+ * Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
  *
  * IDENTIFICATION
  *	  src/backend/utils/adt/format_type.c
@@ -785,10 +785,14 @@ oidvectortypes(PG_FUNCTION_ARGS)
 {
 	oidvector  *oidArray = (oidvector *) PG_GETARG_POINTER(0);
 	char	   *result;
-	int			numargs = oidArray->dim1;
+	int			numargs;
 	int			num;
 	size_t		total;
 	size_t		left;
+
+	/* validate input before fetching dim1 */
+	check_valid_oidvector(oidArray);
+	numargs = oidArray->dim1;
 
 	total = 20 * numargs + 1;
 	result = palloc(total);

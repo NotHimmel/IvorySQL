@@ -75,8 +75,8 @@
 
 static TupleDesc ExecTypeFromTLInternal(List *targetList, bool hasrowid, 
 										bool skipjunk);
-static pg_attribute_always_inline void slot_deform_heap_tuple(TupleTableSlot *slot, HeapTuple tuple, uint32 *offp,
-															  int natts);
+static pg_always_inline void slot_deform_heap_tuple(TupleTableSlot *slot, HeapTuple tuple, uint32 *offp,
+													int natts);
 static inline void tts_buffer_heap_store_tuple(TupleTableSlot *slot,
 											   HeapTuple tuple,
 											   Buffer buffer,
@@ -1121,7 +1121,7 @@ slot_deform_heap_tuple_internal(TupleTableSlot *slot, HeapTuple tuple,
  * This is marked as always inline, so the different offp for different types
  * of slots gets optimized away.
  */
-static pg_attribute_always_inline void
+static pg_always_inline void
 slot_deform_heap_tuple(TupleTableSlot *slot, HeapTuple tuple, uint32 *offp,
 					   int natts)
 {
@@ -1958,7 +1958,7 @@ ExecInitResultTypeTL(PlanState *planstate)
 		hasrowid = false;
 	}
 
-	tupDesc = ExecTypeFromTL(planstate->plan->targetlist, hasrowid);
+	tupDesc = ExecTypeFromTLWithRowId(planstate->plan->targetlist, hasrowid);
 
 	planstate->ps_ResultTupleDesc = tupDesc;
 }
@@ -2136,10 +2136,28 @@ slot_getsomeattrs_int(TupleTableSlot *slot, int attnum)
  *		Currently there are about 4 different places where we create
  *		TupleDescriptors.  They should all be merged, or perhaps
  *		be rewritten to call BuildDesc().
+ *
+ *		IvorySQL note: this function preserves the upstream PostgreSQL
+ *		signature (List *) and semantics (no rowid attribute in the
+ *		resulting tuple header).  Code that needs Oracle-style rowid
+ *		support should call ExecTypeFromTLWithRowId() and pass the
+ *		desired hasrowid value explicitly.
  * ----------------------------------------------------------------
  */
 TupleDesc
-ExecTypeFromTL(List *targetList, bool hasrowid)
+ExecTypeFromTL(List *targetList)
+{
+	return ExecTypeFromTLInternal(targetList, false, false);
+}
+
+/*
+ * ExecTypeFromTLWithRowId -- IvorySQL rowid-aware variant.
+ *
+ * Like ExecTypeFromTL, but the caller decides whether the produced tuple
+ * descriptor carries a rowid attribute (Oracle compatibility).
+ */
+TupleDesc
+ExecTypeFromTLWithRowId(List *targetList, bool hasrowid)
 {
 	return ExecTypeFromTLInternal(targetList, hasrowid, false);
 }
@@ -2147,11 +2165,23 @@ ExecTypeFromTL(List *targetList, bool hasrowid)
 /* ----------------------------------------------------------------
  *		ExecCleanTypeFromTL
  *
- *		Same as above, but resjunk columns are omitted from the result.
+ *		Same as ExecTypeFromTL, but resjunk columns are omitted from
+ *		the result.  IvorySQL note: see ExecTypeFromTL() above -- this
+ *		is the upstream signature; use ExecCleanTypeFromTLWithRowId()
+ *		when rowid control is needed.
  * ----------------------------------------------------------------
  */
 TupleDesc
-ExecCleanTypeFromTL(List *targetList, bool hasrowid)
+ExecCleanTypeFromTL(List *targetList)
+{
+	return ExecTypeFromTLInternal(targetList, false, true);
+}
+
+/*
+ * ExecCleanTypeFromTLWithRowId -- IvorySQL rowid-aware variant.
+ */
+TupleDesc
+ExecCleanTypeFromTLWithRowId(List *targetList, bool hasrowid)
 {
 	return ExecTypeFromTLInternal(targetList, hasrowid, true);
 }

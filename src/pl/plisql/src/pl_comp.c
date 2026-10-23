@@ -3,7 +3,7 @@
  * pl_comp.c		- Compiler part of the PL/iSQL
  *			  procedural language
  *
- * Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+ * Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
  * Portions Copyright (c) 1996-2025, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
@@ -1094,21 +1094,21 @@ do_compile(FunctionCallInfo fcinfo,
 		 * and the function returned datatype.
 		 *
 		 */
-		char	  **argtypenames = NULL;
-		char	   *rettypename = NULL;
+		argtypenames = NULL;
+		rettypename = NULL;
 
 		get_func_typename_info(procTup, &argtypenames, &rettypename);
 		if (argtypenames != NULL)
 		{
-			int			i = 0;
+			int			j = 0;
 
-			for (i = 0; i < procStruct->pronargs; i++)
+			for (j = 0; j < procStruct->pronargs; j++)
 			{
-				if (strcmp(argtypenames[i], "") != 0)
+				if (strcmp(argtypenames[j], "") != 0)
 				{
 					TypeName   *typeName;
 
-					typeName = (TypeName *) stringToNode(argtypenames[i]);
+					typeName = (TypeName *) stringToNode(argtypenames[j]);
 					plisql_add_type_referenced_objects(typeName);
 				}
 			}
@@ -1865,9 +1865,100 @@ resolve_column_ref(ParseState *pstate, PLiSQL_expr * expr,
 									colname),
 							 parser_errposition(pstate, cref->location)));
 			}
+			else if (nnames == 1 && name3 != NULL)
+			{
+				/*
+				 * "v.field.subfield" as a read: v matched unqualified as
+				 * the record itself (nnames == 1, not block-qualified), so
+				 * name2 names a first-level field of v and name3 names a
+				 * field of THAT field's own composite value. Core SQL's
+				 * assignment-target machinery already handles this kind of
+				 * multi-level indirection natively when v.field is an
+				 * assignment target; this is the read-side (expression)
+				 * equivalent, which plisql must build for itself since it
+				 * hands the whole expression to the core parser as a
+				 * ColumnRef. Find/build the first-level RECFIELD, and if
+				 * its own type is a resolvable composite, wrap it in a
+				 * FieldSelect for the second-level field instead of giving
+				 * up (which would surface as a generic "invalid
+				 * identifier" even though the type is fully known).
+				 */
+				PLiSQL_rec *rec = (PLiSQL_rec *) estate->datums[nse->itemno];
+				int			i;
+
+				i = rec->firstfield;
+				while (i >= 0)
+				{
+					PLiSQL_recfield *fld = (PLiSQL_recfield *) estate->datums[i];
+
+					Assert(fld->dtype == PLISQL_DTYPE_RECFIELD &&
+						   fld->recparentno == nse->itemno);
+					if (strcmp(fld->fieldname, name2) == 0)
+					{
+						Oid			ftypeid;
+						int32		ftypmod;
+						Oid			fcollation;
+
+						plisql_exec_get_datum_type_info(estate,
+														(PLiSQL_datum *) fld,
+														&ftypeid, &ftypmod, &fcollation);
+
+						if (type_is_rowtype(ftypeid))
+						{
+							TupleDesc	tupdesc;
+							int			attnum;
+
+							/*
+							 * noError: ftypeid/ftypmod may be a rowtype
+							 * whose structure isn't resolvable here (e.g.
+							 * an anonymous RECORDOID with no blessed
+							 * typmod) without that being a real error --
+							 * fall through to "not composite, or no
+							 * matching subfield" instead of erroring out
+							 * of the parse.
+							 */
+							tupdesc = lookup_rowtype_tupdesc_noerror(ftypeid, ftypmod, true);
+							if (tupdesc != NULL)
+							{
+								for (attnum = 0; attnum < tupdesc->natts; attnum++)
+								{
+									Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum);
+
+									if (attr->attisdropped)
+										continue;
+									if (strcmp(NameStr(attr->attname), name3) == 0)
+									{
+										FieldSelect *fselect = makeNode(FieldSelect);
+
+										/*
+										 * Only now, with a confirmed match,
+										 * register this datum in
+										 * expr->paramnos -- registering it
+										 * earlier would leave a stray unused
+										 * paramno set if no subfield matched.
+										 */
+										fselect->arg = (Expr *) make_datum_param(expr, i, cref->location);
+										fselect->fieldnum = attr->attnum;
+										fselect->resulttype = attr->atttypid;
+										fselect->resulttypmod = attr->atttypmod;
+										fselect->resultcollid = attr->attcollation;
+										ReleaseTupleDesc(tupdesc);
+										return (Node *) fselect;
+									}
+								}
+								ReleaseTupleDesc(tupdesc);
+							}
+						}
+						/* not composite, or no matching subfield */
+						break;
+					}
+					i = fld->nextfield;
+				}
+			}
 			break;
 		case PLISQL_NSTYPE_SUBPROC_FUNC:
 		case PLISQL_NSTYPE_SUBPROC_PROC:
+		case PLISQL_NSTYPE_ROWTYPE:
 			break;
 		default:
 			elog(ERROR, "unrecognized plisql itemtype: %d", nse->itemtype);
@@ -1969,6 +2060,7 @@ plisql_parse_word(char *paramname, char *word1, const char *yytxt, bool lookup,
 
 				case PLISQL_NSTYPE_SUBPROC_FUNC:
 				case PLISQL_NSTYPE_SUBPROC_PROC:
+				case PLISQL_NSTYPE_ROWTYPE:
 					break;
 
 				default:
@@ -2152,6 +2244,10 @@ plisql_parse_dblword(char *paramname, char *word1, char *word2,
 					wdatum->nname_used = nnames;
 					return true;
 
+				case PLISQL_NSTYPE_ROWTYPE:
+					/* a type declaration is not a datum; emit T_CWORD */
+					break;
+
 				default:
 					break;
 			}
@@ -2238,6 +2334,7 @@ plisql_parse_tripword(char *paramname, char *word1, char *word2, char *word3,
 						PLiSQL_recfield *new;
 
 						rec = (PLiSQL_rec *) (plisql_Datums[ns->itemno]);
+
 						if (nnames == 1)
 						{
 							/*
@@ -2266,6 +2363,10 @@ plisql_parse_tripword(char *paramname, char *word1, char *word2, char *word3,
 						wdatum->nname_used = nnames;
 						return true;
 					}
+
+				case PLISQL_NSTYPE_ROWTYPE:
+					/* a type declaration is not a datum; emit T_CWORD */
+					break;
 
 				default:
 					break;
@@ -2358,6 +2459,15 @@ plisql_parse_wordtype(char *ident)
 				return dtype;
 			case PLISQL_NSTYPE_REC:
 				return ((PLiSQL_rec *) (plisql_Datums[nse->itemno]))->datatype;
+			case PLISQL_NSTYPE_ROWTYPE:
+
+				/*
+				 * A "TYPE ... IS RECORD" declaration isn't a variable, so
+				 * "rec_t%TYPE" (where rec_t names the declaration itself,
+				 * not a variable of that type) doesn't resolve here; fall
+				 * through to the "does not exist" error below.
+				 */
+				break;
 			default:
 				break;
 		}
@@ -3222,32 +3332,48 @@ plisql_finish_datums(PLiSQL_function * function)
 {
 	Size		copiable_size = 0;
 	int			i;
+	bool		datums_updated = false;
 
 	/*
 	 * maybe compile a package body which function->ndatums is not null
+	 *
+	 * Package-body compilation seeds plisql_Datums from function->datums
+	 * (see package_body_init()); every other function->item != NULL target
+	 * starts with zero datums. So when the count is unchanged here, it's
+	 * already the same array we'd be copying back -- skip re-copying it.
 	 */
 	if (function->item != NULL)
 	{
 		Assert(function->ndatums <= plisql_nDatums);
 
-		if (function->ndatums == plisql_nDatums)
-			return;
-		if (function->ndatums != 0)
-			function->datums = repalloc(function->datums,
-								sizeof(PLiSQL_datum *) * plisql_nDatums);
-		else
-			function->datums = palloc(sizeof(PLiSQL_datum *) * plisql_nDatums);
-		function->ndatums = plisql_nDatums;
+		if (function->ndatums != plisql_nDatums)
+		{
+			if (function->ndatums != 0)
+				function->datums = repalloc(function->datums,
+									sizeof(PLiSQL_datum *) * plisql_nDatums);
+			else
+				function->datums = palloc_array(PLiSQL_datum *, plisql_nDatums);
+			function->ndatums = plisql_nDatums;
+			datums_updated = true;
+		}
 	}
 	else
 	{
 		function->ndatums = plisql_nDatums;
-		function->datums = palloc(sizeof(PLiSQL_datum *) * plisql_nDatums);
+		function->datums = palloc_array(PLiSQL_datum *, plisql_nDatums);
+		datums_updated = true;
 	}
-	for (i = 0; i < plisql_nDatums; i++)
-	{
-		function->datums[i] = plisql_Datums[i];
 
+	/* Copy datums from global array if they were updated */
+	if (datums_updated)
+	{
+		for (i = 0; i < plisql_nDatums; i++)
+			function->datums[i] = plisql_Datums[i];
+	}
+
+	/* Always recalculate copiable_size to account for new datums being added */
+	for (i = 0; i < function->ndatums; i++)
+	{
 		/* This must agree with copy_plisql_datums on what is copiable */
 		switch (function->datums[i]->dtype)
 		{
@@ -3265,6 +3391,43 @@ plisql_finish_datums(PLiSQL_function * function)
 	function->copiable_size = copiable_size;
 }
 
+
+/*
+ * plisql_datum_belongs_to_subproc
+ *		Check if a datum index falls within any subproc's datum range.
+ *
+ * Subproc datums (parameters and local variables) should not be initialized
+ * by the parent block, as they have their own initialization logic.
+ * Each subproc's datum range is [lastassignvardno, lastoutvardno).
+ */
+static bool
+plisql_datum_belongs_to_subproc(int datum_idx)
+{
+	int		j;
+
+	for (j = 0; j < plisql_nsubprocFuncs; j++)
+	{
+		PLiSQL_subproc_function *subproc = plisql_subprocFuncs[j];
+
+		/*
+		 * Skip subprocs that don't have a function body yet (forward declarations).
+		 * Also skip if lastoutvardno is 0 (not yet set).
+		 */
+		if (subproc->function == NULL || subproc->lastoutvardno == 0)
+			continue;
+
+		/*
+		 * Check if datum_idx falls within [lastassignvardno, lastoutvardno).
+		 * lastassignvardno is set before building subproc args.
+		 * lastoutvardno is set after the subproc body is fully compiled.
+		 */
+		if (datum_idx >= subproc->lastassignvardno &&
+			datum_idx < subproc->lastoutvardno)
+			return true;
+	}
+
+	return false;
+}
 
 /* ----------
  * plisql_add_initdatums		Make an array of the datum numbers of
@@ -3292,6 +3455,19 @@ plisql_add_initdatums(int **varnos)
 	 */
 	for (i = datums_last; i < plisql_nDatums; i++)
 	{
+		/*
+		 * Skip datums that belong to subprocs. These datums (parameters and
+		 * local variables of nested functions/procedures) should not be
+		 * initialized by the parent block. They have their own initialization
+		 * logic within the subproc's execution context.
+		 *
+		 * This prevents crashes when a subproc's local variable has a default
+		 * expression that references the subproc's parameters, which don't
+		 * exist in the parent's execution context.
+		 */
+		if (plisql_datum_belongs_to_subproc(i))
+			continue;
+
 		switch (plisql_Datums[i]->dtype)
 		{
 			case PLISQL_DTYPE_VAR:
@@ -3313,6 +3489,10 @@ plisql_add_initdatums(int **varnos)
 			n = 0;
 			for (i = datums_last; i < plisql_nDatums; i++)
 			{
+				/* Skip subproc datums */
+				if (plisql_datum_belongs_to_subproc(i))
+					continue;
+
 				switch (plisql_Datums[i]->dtype)
 				{
 					case PLISQL_DTYPE_VAR:

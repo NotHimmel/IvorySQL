@@ -945,6 +945,22 @@ DefineIndex(Oid tableId,
 					  &root_save_nestlevel);
 
 	/*
+	 * The below call to index_create() creates the dependencies on types.  We
+	 * are responsible for checking USAGE.
+	 */
+	if (check_rights)
+	{
+		if (indexInfo->ii_Expressions)
+			CheckUsageOnTypesInSingleRelExpr((Node *) indexInfo->ii_Expressions,
+											 tableId,
+											 root_save_userid);
+		if (indexInfo->ii_Predicate)
+			CheckUsageOnTypesInSingleRelExpr((Node *) indexInfo->ii_Predicate,
+											 tableId,
+											 root_save_userid);
+	}
+
+	/*
 	 * Extra checks when creating a PRIMARY KEY index.
 	 */
 	if (stmt->primary)
@@ -1116,7 +1132,8 @@ DefineIndex(Oid tableId,
 					 errmsg("index creation on system columns is not supported")));
 
 
-		if (TupleDescAttr(RelationGetDescr(rel), attno - 1)->attgenerated == ATTRIBUTE_GENERATED_VIRTUAL)
+		if (attno > 0 &&
+			TupleDescAttr(RelationGetDescr(rel), attno - 1)->attgenerated == ATTRIBUTE_GENERATED_VIRTUAL)
 			ereport(ERROR,
 					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					stmt->primary ?
@@ -1158,7 +1175,8 @@ DefineIndex(Oid tableId,
 		{
 			AttrNumber	attno = j + FirstLowInvalidHeapAttributeNumber;
 
-			if (TupleDescAttr(RelationGetDescr(rel), attno - 1)->attgenerated == ATTRIBUTE_GENERATED_VIRTUAL)
+			if (attno > 0 &&
+				TupleDescAttr(RelationGetDescr(rel), attno - 1)->attgenerated == ATTRIBUTE_GENERATED_VIRTUAL)
 				ereport(ERROR,
 						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 						 stmt->isconstraint ?
@@ -2441,8 +2459,8 @@ GetDefaultOpClass(Oid type_id, Oid am_id)
  * Finds an operator from a CompareType.  This is used for temporal index
  * constraints (and other temporal features) to look up equality and overlaps
  * operators.  We ask an opclass support function to translate from the
- * compare type to the internal strategy numbers.  If the function isn't
- * defined or it gives no result, we set *strat to InvalidStrategy.
+ * compare type to the internal strategy numbers.  Raises ERROR on search
+ * failure.
  */
 void
 GetOperatorFromCompareType(Oid opclass, Oid rhstype, CompareType cmptype,
@@ -2844,8 +2862,8 @@ ExecReindex(ParseState *pstate, const ReindexStmt *stmt, bool isTopLevel)
 		else
 			ereport(ERROR,
 					(errcode(ERRCODE_SYNTAX_ERROR),
-					 errmsg("unrecognized REINDEX option \"%s\"",
-							opt->defname),
+					 errmsg("unrecognized %s option \"%s\"",
+							"REINDEX", opt->defname),
 					 parser_errposition(pstate, opt->location)));
 	}
 
@@ -4127,6 +4145,8 @@ ReindexRelationConcurrently(const ReindexStmt *stmt, Oid relationOid, const Rein
 		PopActiveSnapshot();
 		CommitTransactionCommand();
 	}
+
+	INJECTION_POINT("reindex-conc-index-built", NULL);
 
 	StartTransactionCommand();
 

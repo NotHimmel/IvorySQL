@@ -20,7 +20,7 @@
  * by the PG_KEYWORD macro, which is not defined in this file; it can
  * be defined by the caller for special purposes.
  *
- * Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+ * Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
  *
  * IDENTIFICATION
  *	  src/include/oracle_parser/ora_kwlist.h
@@ -296,6 +296,7 @@ PG_KEYWORD("left", LEFT, TYPE_FUNC_NAME_KEYWORD, BARE_LABEL)
 PG_KEYWORD("level", LEVEL, UNRESERVED_KEYWORD, BARE_LABEL)
 PG_KEYWORD("like", LIKE, TYPE_FUNC_NAME_KEYWORD, BARE_LABEL)
 PG_KEYWORD("limit", LIMIT, RESERVED_KEYWORD, AS_LABEL)
+PG_KEYWORD("listagg", LISTAGG, RESERVED_KEYWORD, BARE_LABEL)
 PG_KEYWORD("listen", LISTEN, UNRESERVED_KEYWORD, BARE_LABEL)
 PG_KEYWORD("load", LOAD, UNRESERVED_KEYWORD, BARE_LABEL)
 PG_KEYWORD("local", LOCAL, UNRESERVED_KEYWORD, BARE_LABEL)

@@ -5,7 +5,7 @@
  *
  * Portions Copyright (c) 1996-2025, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
- * Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+ * Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
  *
  *
  * IDENTIFICATION
@@ -2421,8 +2421,27 @@ ExecUpdate(IvyModifyTableContext *context, ResultRelInfo *resultRelInfo,
 	 * Prepare for the update.  This includes BEFORE ROW triggers, so we're
 	 * done if it says we are.
 	 */
+	context->tmfd.traversed = false;
 	if (!ExecUpdatePrologue(context, resultRelInfo, tupleid, oldtuple, slot, NULL))
 		return NULL;
+
+	/*
+	 * If the target tuple was concurrently updated, the trigger code will
+	 * have done EPQ and updated tupleid, following the update chain.  In this
+	 * case, we must fetch the most recent version of old tuple for the
+	 * benefit of RETURNING.  Technically, we could get away with not doing
+	 * this, if there is no RETURNING clause, or it doesn't refer to OLD, but
+	 * it seems preferable to always ensure that the contents of oldSlot are
+	 * correct.
+	 */
+	if (context->tmfd.traversed)
+	{
+		if (!table_tuple_fetch_row_version(resultRelInfo->ri_RelationDesc,
+										   tupleid,
+										   SnapshotAny,
+										   oldSlot))
+			elog(ERROR, "failed to re-fetch tuple updated during trigger execution");
+	}
 
 	/* INSTEAD OF ROW UPDATE Triggers */
 	if (resultRelInfo->ri_TrigDesc &&
@@ -2754,14 +2773,6 @@ ExecOnConflictUpdate(IvyModifyTableContext *context,
 						 errmsg("could not serialize access due to concurrent update")));
 
 			/*
-			 * As long as we don't support an UPDATE of INSERT ON CONFLICT for
-			 * a partitioned table we shouldn't reach to a case where tuple to
-			 * be lock is moved to another partition due to concurrent update
-			 * of the partition key.
-			 */
-			Assert(!ItemPointerIndicatesMovedPartitions(&tmfd.ctid));
-
-			/*
 			 * Tell caller to try again from the very start.
 			 *
 			 * It does not make sense to use the usual EvalPlanQual() style
@@ -2778,7 +2789,6 @@ ExecOnConflictUpdate(IvyModifyTableContext *context,
 						 errmsg("could not serialize access due to concurrent delete")));
 
 			/* see TM_Updated case */
-			Assert(!ItemPointerIndicatesMovedPartitions(&tmfd.ctid));
 			ExecClearTuple(existing);
 			return false;
 
@@ -3307,6 +3317,11 @@ lmerge_matched:
 							   *inputslot;
 					LockTupleMode lockmode;
 
+					if (IsolationUsesXactSnapshot())
+						ereport(ERROR,
+								(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+								 errmsg("could not serialize access due to concurrent update")));
+
 					/*
 					 * The target tuple was concurrently updated by some other
 					 * transaction.  If we are currently processing a MATCHED
@@ -3411,7 +3426,28 @@ lmerge_matched:
 
 								/* Switch lists, if necessary */
 								if (!*matched)
+								{
 									actionStates = mergeActions[MERGE_WHEN_NOT_MATCHED_BY_SOURCE];
+
+									/*
+									 * If we have both NOT MATCHED BY SOURCE
+									 * and NOT MATCHED BY TARGET actions (a
+									 * full join between the source and target
+									 * relations), the single previously
+									 * matched tuple from the outer plan node
+									 * is treated as two not matched tuples,
+									 * in the same way as if they had not
+									 * matched to start with.  Therefore, we
+									 * must adjust the outer plan node's tuple
+									 * count, if we're instrumenting the
+									 * query, to get the correct "skipped" row
+									 * count --- see show_modifytable_info().
+									 */
+									if (outerPlanState(mtstate)->instrument &&
+										mergeActions[MERGE_WHEN_NOT_MATCHED_BY_SOURCE] &&
+										mergeActions[MERGE_WHEN_NOT_MATCHED_BY_TARGET])
+										InstrUpdateTupleCount(outerPlanState(mtstate)->instrument, 1.0);
+								}
 							}
 
 							/*
@@ -4307,8 +4343,12 @@ ExecModifyTable(PlanState *pstate)
 				relkind == RELKIND_MATVIEW ||
 				relkind == RELKIND_PARTITIONED_TABLE)
 			{
-				/* ri_RowIdAttNo refers to a ctid attribute */
-				Assert(AttributeNumberIsValid(resultRelInfo->ri_RowIdAttNo));
+				/*
+				 * ri_RowIdAttNo refers to a ctid attribute.  See the comment
+				 * in ExecInitModifyTable().
+				 */
+				Assert(AttributeNumberIsValid(resultRelInfo->ri_RowIdAttNo) ||
+					   relkind == RELKIND_PARTITIONED_TABLE);
 				datum = ExecGetJunkAttribute(slot,
 											 resultRelInfo->ri_RowIdAttNo,
 											 &isNull);
@@ -4585,6 +4625,8 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 	List	   *updateColnosLists = NIL;
 	List	   *mergeActionLists = NIL;
 	List	   *mergeJoinConditions = NIL;
+	List	   *fdwPrivLists = NIL;
+	Bitmapset  *fdwDirectModifyPlans = NULL;
 	ResultRelInfo *resultRelInfo;
 	List	   *arowmarks;
 	ListCell   *l;
@@ -4627,6 +4669,8 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 
 		if (keep_rel)
 		{
+			List	   *fdwPrivList = (List *) list_nth(node->fdwPrivLists, i);
+
 			resultRelations = lappend_int(resultRelations, rti);
 			if (node->withCheckOptionLists)
 			{
@@ -4661,6 +4705,19 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 				List	   *mergeJoinCondition = list_nth(node->mergeJoinConditions, i);
 
 				mergeJoinConditions = lappend(mergeJoinConditions, mergeJoinCondition);
+			}
+
+			/*
+			 * fdwPrivLists/fdwDirectModifyPlans are re-indexed to match
+			 * resultRelations
+			 */
+			fdwPrivLists = lappend(fdwPrivLists, fdwPrivList);
+			if (bms_is_member(i, node->fdwDirectModifyPlans))
+			{
+				int			new_index = list_length(resultRelations) - 1;
+
+				fdwDirectModifyPlans = bms_add_member(fdwDirectModifyPlans,
+													  new_index);
 			}
 		}
 		i++;
@@ -4766,7 +4823,7 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 
 		/* Initialize the usesFdwDirectModify flag */
 		resultRelInfo->ri_usesFdwDirectModify =
-			bms_is_member(i, node->fdwDirectModifyPlans);
+			bms_is_member(i, fdwDirectModifyPlans);
 
 		/*
 		 * Verify result relation is a valid target for the current operation
@@ -4795,7 +4852,7 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 			resultRelInfo->ri_FdwRoutine != NULL &&
 			resultRelInfo->ri_FdwRoutine->BeginForeignModify != NULL)
 		{
-			List	   *fdw_private = (List *) list_nth(node->fdwPrivLists, i);
+			List	   *fdw_private = (List *) list_nth(fdwPrivLists, i);
 
 			resultRelInfo->ri_FdwRoutine->BeginForeignModify(mtstate,
 															 resultRelInfo,
@@ -4822,7 +4879,16 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 			{
 				resultRelInfo->ri_RowIdAttNo =
 					ExecFindJunkAttributeInTlist(subplan->targetlist, "ctid");
-				if (!AttributeNumberIsValid(resultRelInfo->ri_RowIdAttNo))
+
+				/*
+				 * For heap relations, a ctid junk attribute must be present.
+				 * Partitioned tables should only appear here when all leaf
+				 * partitions were pruned, in which case no rows can be
+				 * produced and ctid is not needed.
+				 */
+				if (relkind == RELKIND_PARTITIONED_TABLE)
+					Assert(nrels == 1);
+				else if (!AttributeNumberIsValid(resultRelInfo->ri_RowIdAttNo))
 					elog(ERROR, "could not find junk ctid column");
 			}
 			else if (relkind == RELKIND_FOREIGN_TABLE)
@@ -5031,15 +5097,19 @@ ExecInitModifyTable(ModifyTable *node, EState *estate, int eflags)
 	foreach(l, node->rowMarks)
 	{
 		PlanRowMark *rc = lfirst_node(PlanRowMark, l);
+		RangeTblEntry *rte = exec_rt_fetch(rc->rti, estate);
 		ExecRowMark *erm;
 		ExecAuxRowMark *aerm;
 
+		/* ignore "parent" rowmarks; they are irrelevant at runtime */
+		if (rc->isParent)
+			continue;
+
 		/*
-		 * Ignore "parent" rowmarks, because they are irrelevant at runtime.
-		 * Also ignore the rowmarks belonging to child tables that have been
+		 * Also ignore rowmarks belonging to child tables that have been
 		 * pruned in ExecDoInitialPruning().
 		 */
-		if (rc->isParent ||
+		if (rte->rtekind == RTE_RELATION &&
 			!bms_is_member(rc->rti, estate->es_unpruned_relids))
 			continue;
 

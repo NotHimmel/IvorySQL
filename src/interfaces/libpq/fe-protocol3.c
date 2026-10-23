@@ -16,6 +16,7 @@
 
 #include <ctype.h>
 #include <fcntl.h>
+#include <limits.h>
 
 #ifdef WIN32
 #include "win32.h"
@@ -24,6 +25,7 @@
 #include <netinet/tcp.h>
 #endif
 
+#include "common/int.h"
 #include "libpq-fe.h"
 #include "libpq-int.h"
 #include "mb/pg_wchar.h"
@@ -40,7 +42,8 @@
 	 (id) == PqMsg_FunctionCallResponse || \
 	 (id) == PqMsg_NoticeResponse || \
 	 (id) == PqMsg_NotificationResponse || \
-	 (id) == PqMsg_RowDescription)
+	 (id) == PqMsg_RowDescription || \
+	 (id) == PqMsg_ParameterDescription)
 
 
 static void handleFatalError(PGconn *conn);
@@ -55,8 +58,8 @@ static int	getCopyStart(PGconn *conn, ExecStatusType copytype);
 static int	getReadyForQuery(PGconn *conn);
 static void reportErrorPosition(PQExpBuffer msg, const char *query,
 								int loc, int encoding);
-static int	build_startup_packet(const PGconn *conn, char *packet,
-								 const PQEnvironmentOption *options);
+static size_t build_startup_packet(const PGconn *conn, char *packet,
+								   const PQEnvironmentOption *options);
 
 
 /*
@@ -1234,8 +1237,21 @@ reportErrorPosition(PQExpBuffer msg, const char *query, int loc, int encoding)
 	 * scridx[] respectively.
 	 */
 
-	/* we need a safe allocation size... */
+	/*
+	 * We need a safe allocation size.
+	 *
+	 * The only caller of reportErrorPosition() is pqBuildErrorMessage3(); it
+	 * gets its query from either a PQresultErrorField() or a PGcmdQueueEntry,
+	 * both of which must have fit into conn->inBuffer/outBuffer. So slen fits
+	 * inside an int, but we can't assume that (slen * sizeof(int)) fits
+	 * inside a size_t.
+	 */
 	slen = strlen(wquery) + 1;
+	if (slen > SIZE_MAX / sizeof(int))
+	{
+		free(wquery);
+		return;
+	}
 
 	qidx = (int *) malloc(slen * sizeof(int));
 	if (qidx == NULL)
@@ -1865,6 +1881,13 @@ getCopyDataMessage(PGconn *conn)
 				return -1;
 		}
 
+		/*
+		 * An error may have been triggered while processing the message,
+		 * report it if it's the case
+		 */
+		if (conn->error_result && conn->status == CONNECTION_BAD)
+			return -2;
+
 		/* Drop the processed message and loop around for another */
 		pqParseDone(conn, conn->inCursor);
 	}
@@ -2140,7 +2163,7 @@ pqEndcopy3(PGconn *conn)
  */
 PGresult *
 pqFunctionCall3(PGconn *conn, Oid fnid,
-				int *result_buf, int *actual_result_len,
+				int *result_buf, int buf_size, int *actual_result_len,
 				int result_is_int,
 				const PQArgBlock *args, int nargs)
 {
@@ -2274,6 +2297,17 @@ pqFunctionCall3(PGconn *conn, Oid fnid,
 					}
 					else
 					{
+						/*
+						 * If the server returned too much data for the
+						 * buffer, something fishy is going on.  Abandon ship.
+						 */
+						if (buf_size != -1 && *actual_result_len > buf_size)
+						{
+							libpq_append_conn_error(conn, "server returned too much data");
+							handleFatalError(conn);
+							return pqPrepareAsyncResult(conn);
+						}
+
 						if (pqGetnchar(result_buf,
 									   *actual_result_len,
 									   conn))
@@ -2348,6 +2382,13 @@ pqFunctionCall3(PGconn *conn, Oid fnid,
 				return pqPrepareAsyncResult(conn);
 		}
 
+		/*
+		 * An error may have been triggered while processing the message, bail
+		 * out
+		 */
+		if (conn->error_result && conn->status == CONNECTION_BAD)
+			return pqPrepareAsyncResult(conn);
+
 		/* Completed parsing this message, keep going */
 		pqParseDone(conn, conn->inStart + 5 + msgLength);
 		needInput = false;
@@ -2373,12 +2414,20 @@ pqBuildStartupPacket3(PGconn *conn, int *packetlen,
 					  const PQEnvironmentOption *options)
 {
 	char	   *startpacket;
+	size_t		len;
 
-	*packetlen = build_startup_packet(conn, NULL, options);
+	len = build_startup_packet(conn, NULL, options);
+	if (len == 0 || len > INT_MAX)
+		return NULL;
+
+	*packetlen = len;
 	startpacket = (char *) malloc(*packetlen);
 	if (!startpacket)
 		return NULL;
-	*packetlen = build_startup_packet(conn, startpacket, options);
+
+	len = build_startup_packet(conn, startpacket, options);
+	Assert(*packetlen == len);
+
 	return startpacket;
 }
 
@@ -2389,13 +2438,13 @@ pqBuildStartupPacket3(PGconn *conn, int *packetlen,
  * To avoid duplicate logic, this routine is called twice: the first time
  * (with packet == NULL) just counts the space needed, the second time
  * (with packet == allocated space) fills it in.  Return value is the number
- * of bytes used.
+ * of bytes used, or zero in the unlikely event of size_t overflow.
  */
-static int
+static size_t
 build_startup_packet(const PGconn *conn, char *packet,
 					 const PQEnvironmentOption *options)
 {
-	int			packet_len = 0;
+	size_t		packet_len = 0;
 	const PQEnvironmentOption *next_eo;
 	const char *val;
 
@@ -2414,10 +2463,12 @@ build_startup_packet(const PGconn *conn, char *packet,
 	do { \
 		if (packet) \
 			strcpy(packet + packet_len, optname); \
-		packet_len += strlen(optname) + 1; \
+		if (pg_add_size_overflow(packet_len, strlen(optname) + 1, &packet_len)) \
+			return 0; \
 		if (packet) \
 			strcpy(packet + packet_len, optval); \
-		packet_len += strlen(optval) + 1; \
+		if (pg_add_size_overflow(packet_len, strlen(optval) + 1, &packet_len)) \
+			return 0; \
 	} while(0)
 
 	if (conn->pguser && conn->pguser[0])
@@ -2452,7 +2503,8 @@ build_startup_packet(const PGconn *conn, char *packet,
 	/* Add trailing terminator */
 	if (packet)
 		packet[packet_len] = '\0';
-	packet_len++;
+	if (pg_add_size_overflow(packet_len, 1, &packet_len))
+		return 0;
 
 	return packet_len;
 }

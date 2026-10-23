@@ -5,7 +5,7 @@
  *
  * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
- * Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+ * Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
  *
  * IDENTIFICATION
  *		src/oracle_test/modules/test_regex/test_regex.c
@@ -416,7 +416,8 @@ parse_test_flags(test_re_flags *flags, text *opts)
 					ereport(ERROR,
 							(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 							 errmsg("invalid regular expression test option: \"%.*s\"",
-									pg_mblen(opt_p + i), opt_p + i)));
+									pg_mblen_range(opt_p + i, opt_p + opt_len),
+									opt_p + i)));
 					break;
 			}
 		}

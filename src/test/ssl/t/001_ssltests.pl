@@ -742,32 +742,28 @@ TODO:
 
 # pg_stat_ssl
 
-my $serialno = `$ENV{OPENSSL} x509 -serial -noout -in ssl/client.crt`;
-if ($? == 0)
-{
-	# OpenSSL prints serial numbers in hexadecimal and converting the serial
-	# from hex requires a 64-bit capable Perl as the serialnumber is based on
-	# the current timestamp. On 32-bit fall back to checking for it being an
-	# integer like how we do when grabbing the serial fails.
-	if ($Config{ivsize} == 8)
-	{
-		no warnings qw(portable);
+# If the openssl program isn't available, or fails to run, fall back to a
+# generic integer match rather than skipping the test.
+my $serialno = '\d+';
 
-		$serialno =~ s/^serial=//;
-		$serialno =~ s/\s+//g;
-		$serialno = hex($serialno);
-	}
-	else
-	{
-		$serialno = '\d+';
-	}
-}
-else
+if ($ENV{OPENSSL} ne '')
 {
-	# OpenSSL isn't functioning on the user's PATH. This probably isn't worth
-	# skipping the test over, so just fall back to a generic integer match.
-	warn "couldn't run \"$ENV{OPENSSL} x509\" to get client cert serialno";
-	$serialno = '\d+';
+	my $serialstr = `$ENV{OPENSSL} x509 -serial -noout -in ssl/client.crt`;
+	if ($? == 0)
+	{
+		# OpenSSL prints serial numbers in hexadecimal and converting the serial
+		# from hex requires a 64-bit capable Perl as the serialnumber is based on
+		# the current timestamp. On 32-bit fall back to checking for it being an
+		# integer like how we do when grabbing the serial fails.
+		if ($Config{ivsize} == 8)
+		{
+			no warnings qw(portable);
+
+			$serialstr =~ s/^serial=//;
+			$serialstr =~ s/\s+//g;
+			$serialno = hex($serialstr);
+		}
+	}
 }
 
 command_like(
@@ -817,7 +813,7 @@ $node->connect_fails(
 	"$common_connstr user=ssltestuser sslcert=ssl/client-revoked.crt "
 	  . sslkey('client-revoked.key'),
 	"certificate authorization fails with revoked client cert",
-	expected_stderr => qr|SSL error: ssl[a-z0-9/]* alert certificate revoked|,
+	expected_stderr => qr!SSL error: (ssl[a-z0-9/]*|tls) alert certificate revoked!,
 	log_like => [
 		qr{Client certificate verification failed at depth 0: certificate revoked},
 		qr{Failed certificate data \(unverified\): subject "/CN=ssltestuser", serial number \d+, issuer "/CN=Test CA for PostgreSQL SSL regression test client certs"},
@@ -915,7 +911,7 @@ $node->connect_fails(
 	"$common_connstr user=ssltestuser sslcert=ssl/client-revoked.crt "
 	  . sslkey('client-revoked.key'),
 	"certificate authorization fails with revoked client cert with server-side CRL directory",
-	expected_stderr => qr|SSL error: ssl[a-z0-9/]* alert certificate revoked|,
+	expected_stderr => qr!SSL error: (ssl[a-z0-9/]*|tls) alert certificate revoked!,
 	log_like => [
 		qr{Client certificate verification failed at depth 0: certificate revoked},
 		qr{Failed certificate data \(unverified\): subject "/CN=ssltestuser", serial number \d+, issuer "/CN=Test CA for PostgreSQL SSL regression test client certs"},
@@ -926,7 +922,7 @@ $node->connect_fails(
 	"$common_connstr user=ssltestuser sslcert=ssl/client-revoked-utf8.crt "
 	  . sslkey('client-revoked-utf8.key'),
 	"certificate authorization fails with revoked UTF-8 client cert with server-side CRL directory",
-	expected_stderr => qr|SSL error: ssl[a-z0-9/]* alert certificate revoked|,
+	expected_stderr => qr!SSL error: (ssl[a-z0-9/]*|tls) alert certificate revoked!,
 	log_like => [
 		qr{Client certificate verification failed at depth 0: certificate revoked},
 		qr{Failed certificate data \(unverified\): subject "/CN=\\xce\\x9f\\xce\\xb4\\xcf\\x85\\xcf\\x83\\xcf\\x83\\xce\\xad\\xce\\xb1\\xcf\\x82", serial number \d+, issuer "/CN=Test CA for PostgreSQL SSL regression test client certs"},

@@ -5,7 +5,7 @@
  *
  * Original coding 1998, Jan Wieck.  Heavily revised 2003, Tom Lane.
  *
- * Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+ * Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
  * Copyright (c) 1998-2025, PostgreSQL Global Development Group
  *
  * src/include/utils/numeric.h
@@ -17,6 +17,9 @@
 
 #include "common/pg_prng.h"
 #include "fmgr.h"
+
+/* forward declaration to avoid node.h include */
+struct Node;
 
 /*
  * Limits on the precision and scale specifiable in a NUMERIC typmod.  The
@@ -104,6 +107,8 @@ extern Numeric numeric_mod_opt_error(Numeric num1, Numeric num2,
 									 bool *have_error);
 extern int32 numeric_int4_opt_error(Numeric num, bool *have_error);
 extern int64 numeric_int8_opt_error(Numeric num, bool *have_error);
+extern int32 make_numeric_typmod_safe(int32 precision, int32 scale,
+									  struct Node *escontext);
 
 extern Numeric numeric_bitand(Numeric arg1, Numeric arg2);
 extern Numeric random_numeric(pg_prng_state *state,

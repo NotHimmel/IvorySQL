@@ -846,8 +846,12 @@ CREATE TABLE notnull_tbl1 (a INTEGER NOT NULL NOT NULL);
 Not-null constraints:
     "notnull_tbl1_a_not_null" NOT NULL "a"
 
--- no-op
+-- specifying an existing constraint is a no-op
+ALTER TABLE notnull_tbl1 ADD CONSTRAINT notnull_tbl1_a_not_null NOT NULL a;
+-- but using a different constraint name is not allowed
 ALTER TABLE notnull_tbl1 ADD CONSTRAINT nn NOT NULL a;
+ERROR:  cannot create not-null constraint "nn" on column "a" of table "notnull_tbl1"
+DETAIL:  A not-null constraint named "notnull_tbl1_a_not_null" already exists for this column.
 \d+ notnull_tbl1
                                Table "public.notnull_tbl1"
  Column |  Type   | Collation | Nullable | Default | Storage | Stats target | Description 
@@ -1038,6 +1042,10 @@ CREATE TABLE ATACC1 (a int NOT NULL NO INHERIT) PARTITION BY LIST (a);
 ERROR:  not-null constraints on partitioned tables cannot be NO INHERIT
 CREATE TABLE ATACC1 (a int, NOT NULL a NO INHERIT) PARTITION BY LIST (a);
 ERROR:  not-null constraints on partitioned tables cannot be NO INHERIT
+CREATE TABLE ATACC1 (a int, CONSTRAINT a_is_not_null NOT NULL a) PARTITION BY LIST (a);
+ALTER TABLE ATACC1 ALTER CONSTRAINT a_is_not_null NO INHERIT;
+ERROR:  not-null constraint "a_is_not_null" on partitioned table "atacc1" cannot be NO INHERIT
+DROP TABLE ATACC1;
 -- it's not possible to override a no-inherit constraint with an inheritable one
 CREATE TABLE ATACC2 (a int, CONSTRAINT a_is_not_null NOT NULL a NO INHERIT);
 CREATE TABLE ATACC1 (a int);
@@ -1404,6 +1412,10 @@ ALTER TABLE notnull_tbl1 ADD PRIMARY KEY (a);
 ERROR:  cannot create primary key on column "a"
 DETAIL:  The constraint "nn" on column "a" of table "notnull_tbl1", marked NOT VALID, is incompatible with a primary key.
 HINT:  You might need to validate it using ALTER TABLE ... VALIDATE CONSTRAINT.
+-- cannot set column as generated-as-identity if it has an invalid not-null
+ALTER TABLE notnull_tbl1 ALTER COLUMN a ADD GENERATED ALWAYS AS IDENTITY;
+ERROR:  incompatible NOT VALID constraint "nn" on relation "notnull_tbl1"
+HINT:  You might need to validate it using ALTER TABLE ... VALIDATE CONSTRAINT.
 -- ALTER column SET NOT NULL validates an invalid constraint (but this fails
 -- because of rows with null values)
 ALTER TABLE notnull_tbl1 ALTER a SET NOT NULL;
@@ -1705,3 +1717,7 @@ DROP ROLE regress_constraint_comments_noaccess;
 CREATE DOMAIN constraint_comments_dom AS int;
 ALTER DOMAIN constraint_comments_dom ADD CONSTRAINT inv_ck CHECK (value > 0) NOT VALID;
 COMMENT ON CONSTRAINT inv_ck ON DOMAIN constraint_comments_dom IS 'comment on invalid constraint';
+-- Create a table that exercises pg_upgrade
+CREATE TABLE regress_notnull1 (a integer);
+CREATE TABLE regress_notnull2 () INHERITS (regress_notnull1);
+ALTER TABLE ONLY regress_notnull2 ALTER COLUMN a SET NOT NULL;

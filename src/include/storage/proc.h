@@ -6,7 +6,7 @@
  *
  * Portions Copyright (c) 1996-2025, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
- * Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+ * Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
  *
  * src/include/storage/proc.h
  *
@@ -461,6 +461,7 @@ extern PGDLLIMPORT PGPROC *PreparedXactProcs;
 #define MAX_IO_WORKERS          32
 #define NUM_AUXILIARY_PROCS		(6 + MAX_IO_WORKERS)
 
+#define FIRST_PREPARED_XACT_PROC_NUMBER	(MaxBackends + NUM_AUXILIARY_PROCS)
 
 /* configurable options */
 extern PGDLLIMPORT int DeadlockTimeout;

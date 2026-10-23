@@ -549,7 +549,7 @@ PortalStart(Portal portal, ParamListInfo params,
 
 					pstmt = PortalGetPrimaryStmt(portal);
 					portal->tupDesc =
-						ExecCleanTypeFromTL(pstmt->planTree->targetlist, false);
+						ExecCleanTypeFromTLWithRowId(pstmt->planTree->targetlist, false);
 				}
 
 				/*
@@ -1017,8 +1017,8 @@ FillPortalStore(Portal portal, bool isTopLevel)
 									portal->holdStore,
 									portal->holdContext,
 									false,
-									NULL,
-									NULL);
+									portal->tupDesc,
+									gettext_noop("query result type does not match portal result type"));
 
 	switch (portal->strategy)
 	{

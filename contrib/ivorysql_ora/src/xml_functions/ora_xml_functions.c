@@ -18,7 +18,7 @@
  * Abstract:
  * 		This file implements the C functions that support the XML SQL functions
  *
- * Copyright (c) 2023-2025, IvorySQL Global Development Team
+ * Copyright (c) 2023-2026, IvorySQL Global Development Team
  *
  * Identification:
  *		contrib/ivorysql_ora/src/xml_functions/ora_xml_functions.c
@@ -535,20 +535,21 @@ register_ns_from_csting(xmlXPathContextPtr xpathCtx, char* nsList)
 			elog(ERROR, "Invalid namespace");
 
 		appendStringInfoString(&tmp, sub);
-		appendStringInfoString(&prefix, "");
-		appendStringInfoString(&url, "");
 
 		/* get the prefix */
 		start = strchr(tmp.data, (int)':');
 		end = strchr(tmp.data, (int)'=');
-		memcpy(prefix.data, start + 1, end - start);
-		prefix.data[end - start -1] = '\0';
+		if (start == NULL || end == NULL || end <= start)
+			elog(ERROR, "Invalid namespace");
+		/* appendBinaryStringInfo() grows the buffer as needed, avoiding overflow */
+		appendBinaryStringInfo(&prefix, start + 1, end - start - 1);
 
 		/* get the url */
 		p1 = strstr(tmp.data, "=");
 		l1 = strlen(p1);
-		memcpy(url.data, p1 + 2, l1 - 3);
-		url.data[l1 - 3] = '\0';
+		if (l1 < 3)
+			elog(ERROR, "Invalid namespace");
+		appendBinaryStringInfo(&url, p1 + 2, l1 - 3);
 
 		/* do register namespace */
 		if (xmlXPathRegisterNs(xpathCtx, (xmlChar *)prefix.data, (xmlChar *)url.data) != 0)
@@ -2416,6 +2417,6 @@ Datum ivy_xmlisvalid(PG_FUNCTION_ARGS)
 	}
 #else
 	NO_XML_SUPPORT();
-	return NULL;
+	return 0;
 #endif
 }

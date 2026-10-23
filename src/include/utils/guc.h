@@ -5,7 +5,7 @@
  *
  * Copyright (c) 2000-2025, PostgreSQL Global Development Group
  * Written by Peter Eisentraut <peter_e@gmx.net>.
- * Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+ * Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
  *
  * src/include/utils/guc.h
  *--------------------------------------------------------------------
@@ -229,6 +229,8 @@ typedef enum
 							   0x002000 /* can't set in PG_AUTOCONF_FILENAME */
 #define GUC_RUNTIME_COMPUTED   0x004000 /* delay processing in 'postgres -C' */
 #define GUC_ALLOW_IN_PARALLEL  0x008000 /* allow setting in parallel mode */
+
+#define GUC_DISALLOW_IN_DB_ROLE_SETTING  0x800000 /* IvorySQL: can't set via ALTER USER/DATABASE SET */
 
 #define GUC_UNIT_KB			 0x01000000 /* value is in kilobytes */
 #define GUC_UNIT_BLOCKS		 0x02000000 /* value is in blocks */

@@ -624,7 +624,9 @@ DROP TABLE deferred_excl;
 -- verify constraints created for NOT NULL clauses
 CREATE TABLE notnull_tbl1 (a INTEGER NOT NULL NOT NULL);
 \d+ notnull_tbl1
--- no-op
+-- specifying an existing constraint is a no-op
+ALTER TABLE notnull_tbl1 ADD CONSTRAINT notnull_tbl1_a_not_null NOT NULL a;
+-- but using a different constraint name is not allowed
 ALTER TABLE notnull_tbl1 ADD CONSTRAINT nn NOT NULL a;
 \d+ notnull_tbl1
 -- duplicate name
@@ -701,6 +703,9 @@ DROP TABLE ATACC1, ATACC2, ATACC3;
 -- NOT NULL NO INHERIT is not possible on partitioned tables
 CREATE TABLE ATACC1 (a int NOT NULL NO INHERIT) PARTITION BY LIST (a);
 CREATE TABLE ATACC1 (a int, NOT NULL a NO INHERIT) PARTITION BY LIST (a);
+CREATE TABLE ATACC1 (a int, CONSTRAINT a_is_not_null NOT NULL a) PARTITION BY LIST (a);
+ALTER TABLE ATACC1 ALTER CONSTRAINT a_is_not_null NO INHERIT;
+DROP TABLE ATACC1;
 
 -- it's not possible to override a no-inherit constraint with an inheritable one
 CREATE TABLE ATACC2 (a int, CONSTRAINT a_is_not_null NOT NULL a NO INHERIT);
@@ -832,6 +837,9 @@ ALTER TABLE notnull_tbl1 ADD CONSTRAINT nn NOT NULL a;
 
 -- cannot add primary key on a column with an invalid not-null
 ALTER TABLE notnull_tbl1 ADD PRIMARY KEY (a);
+
+-- cannot set column as generated-as-identity if it has an invalid not-null
+ALTER TABLE notnull_tbl1 ALTER COLUMN a ADD GENERATED ALWAYS AS IDENTITY;
 
 -- ALTER column SET NOT NULL validates an invalid constraint (but this fails
 -- because of rows with null values)
@@ -1012,6 +1020,7 @@ DEALLOCATE get_nnconstraint_info;
 -- Comments
 -- Setup a low-level role to enforce non-superuser checks.
 CREATE ROLE regress_constraint_comments;
+GRANT CREATE ON SCHEMA public TO regress_constraint_comments;
 SET SESSION AUTHORIZATION regress_constraint_comments;
 
 CREATE TABLE constraint_comments_tbl (a int CONSTRAINT the_constraint CHECK (a > 0));
@@ -1042,6 +1051,7 @@ RESET SESSION AUTHORIZATION;
 DROP TABLE constraint_comments_tbl;
 DROP DOMAIN constraint_comments_dom;
 
+REVOKE CREATE ON SCHEMA public FROM regress_constraint_comments;
 DROP ROLE regress_constraint_comments;
 DROP ROLE regress_constraint_comments_noaccess;
 
@@ -1050,3 +1060,8 @@ CREATE DOMAIN constraint_comments_dom AS int;
 
 ALTER DOMAIN constraint_comments_dom ADD CONSTRAINT inv_ck CHECK (value > 0) NOT VALID;
 COMMENT ON CONSTRAINT inv_ck ON DOMAIN constraint_comments_dom IS 'comment on invalid constraint';
+
+-- Create a table that exercises pg_upgrade
+CREATE TABLE regress_notnull1 (a integer);
+CREATE TABLE regress_notnull2 () INHERITS (regress_notnull1);
+ALTER TABLE ONLY regress_notnull2 ALTER COLUMN a SET NOT NULL;

@@ -5,7 +5,7 @@
  *
  * Portions Copyright (c) 1996-2025, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
- * Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+ * Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
  *
  * src/bin/pg_dump/pg_dump.h
  *
@@ -336,6 +336,7 @@ typedef struct _tableInfo
 	bool		forcerowsec;	/* is row security forced? */
 	bool		hasoids;		/* does it have OIDs? */
 	bool		relhasrowid;
+	char		forceview_case; /* identifier case of invalid FORCE VIEW, or zero */
 	uint32		frozenxid;		/* table's relfrozenxid */
 	uint32		minmxid;		/* table's relminmxid */
 	Oid			toast_oid;		/* toast table's OID, or 0 if none */
@@ -441,7 +442,7 @@ typedef struct _indxInfo
 	char	   *indstatvals;	/* statistic values for columns */
 	int			indnkeyattrs;	/* number of index key attributes */
 	int			indnattrs;		/* total number of index attributes */
-	Oid		   *indkeys;		/* In spite of the name 'indkeys' this field
+	int		   *indkeys;		/* In spite of the name 'indkeys' this field
 								 * contains both key and nonkey attributes */
 	bool		indisclustered;
 	bool		indisreplident;
@@ -789,7 +790,8 @@ extern SubscriptionInfo *findSubscriptionByOid(Oid oid);
 extern void recordExtensionMembership(CatalogId catId, ExtensionInfo *ext);
 extern ExtensionInfo *findOwningExtension(CatalogId catalogId);
 
-extern void parseOidArray(const char *str, Oid *array, int arraysize);
+extern Oid *parseOidArray(const char *str, int arraysize);
+extern int *parseIntArray(const char *str, int arraysize);
 
 extern void sortDumpableObjects(DumpableObject **objs, int numObjs,
 								DumpId preBoundaryId, DumpId postBoundaryId);

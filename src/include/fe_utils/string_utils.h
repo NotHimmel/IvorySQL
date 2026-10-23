@@ -8,7 +8,7 @@
  *
  * Portions Copyright (c) 1996-2025, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
- * Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+ * Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
  *
  * src/include/fe_utils/string_utils.h
  *
@@ -49,6 +49,8 @@ extern void appendShellString(PQExpBuffer buf, const char *str);
 extern bool appendShellStringNoError(PQExpBuffer buf, const char *str);
 extern void appendConnStrVal(PQExpBuffer buf, const char *str);
 extern void appendPsqlMetaConnect(PQExpBuffer buf, const char *dbname);
+
+extern bool SplitGUCList(char *rawstring, char separator, char ***namelist);
 
 extern bool parsePGArray(const char *atext, char ***itemarray, int *nitems);
 extern void appendPGArray(PQExpBuffer buffer, const char *value);

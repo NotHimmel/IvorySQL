@@ -4,7 +4,7 @@
 #
 # Portions Copyright (c) 1996-2025, PostgreSQL Global Development Group
 # Portions Copyright (c) 1994, Regents of the University of California
-# Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+# Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
 #
 # src/backend/Makefile
 #
@@ -115,9 +115,6 @@ parser/gram.h: parser/gram.y
 storage/lmgr/lwlocknames.h: storage/lmgr/generate-lwlocknames.pl ../include/storage/lwlocklist.h utils/activity/wait_event_names.txt
 	$(MAKE) -C storage/lmgr lwlocknames.h
 
-utils/activity/wait_event_types.h: utils/activity/generate-wait_event_types.pl utils/activity/wait_event_names.txt
-	$(MAKE) -C utils/activity wait_event_types.h pgstat_wait_event.c wait_event_funcs_data.c
-
 # run this unconditionally to avoid needing to know its dependencies here:
 submake-catalog-headers:
 	$(MAKE) -C ../include/catalog generated-headers
@@ -142,19 +139,16 @@ submake-utils-headers:
 
 .PHONY: generated-headers
 
-generated-headers: $(top_builddir)/src/include/storage/lwlocknames.h $(top_builddir)/src/include/utils/wait_event_types.h submake-catalog-headers submake-nodes-headers submake-utils-headers parser/gram.h
+generated-headers: $(top_builddir)/src/include/storage/lwlocknames.h submake-catalog-headers submake-nodes-headers submake-utils-headers parser/gram.h
 
 $(top_builddir)/src/include/storage/lwlocknames.h: storage/lmgr/lwlocknames.h
 	prereqdir=`cd '$(dir $<)' >/dev/null && pwd` && \
 	  cd '$(dir $@)' && rm -f $(notdir $@) && \
 	  $(LN_S) "$$prereqdir/$(notdir $<)" .
 
-$(top_builddir)/src/include/utils/wait_event_types.h: utils/activity/wait_event_types.h
-	prereqdir=`cd '$(dir $<)' >/dev/null && pwd` && \
-	  cd '$(dir $@)' && rm -f $(notdir $@) && \
-	  $(LN_S) "$$prereqdir/$(notdir $<)" .
-
+# SystemTap generates semaphore definitions without prior declarations.
 utils/probes.o: utils/probes.d $(SUBDIROBJS)
+	CFLAGS="$(filter-out -Wmissing-variable-declarations -Werror=missing-variable-declarations,$(CFLAGS))" \
 	$(DTRACE) $(DTRACEFLAGS) -C -G -s $(call expand_subsys,$^) -o $@
 
 

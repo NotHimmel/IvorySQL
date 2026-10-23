@@ -47,7 +47,17 @@
 int
 pg_numa_init(void)
 {
-	int			r = numa_available();
+	int			r;
+
+	/*
+	 * XXX libnuma versions before 2.0.19 don't handle EPERM by disabling
+	 * NUMA, which then leads to unexpected failures later. This affects
+	 * containers that disable get_mempolicy by a seccomp profile.
+	 */
+	if (get_mempolicy(NULL, NULL, 0, 0, 0) < 0 && (errno == EPERM))
+		r = -1;
+	else
+		r = numa_available();
 
 	return r;
 }
@@ -77,7 +87,9 @@ pg_numa_query_pages(int pid, unsigned long count, void **pages, int *status)
 		unsigned long count_chunk = Min(count - next,
 										NUMA_QUERY_CHUNK_SIZE);
 
+#ifndef FRONTEND
 		CHECK_FOR_INTERRUPTS();
+#endif
 
 		/*
 		 * Bail out if any of the chunks errors out (ret<0). We ignore (ret>0)

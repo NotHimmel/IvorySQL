@@ -6,7 +6,7 @@
  * ora_gram.y
  *	  IvorySQL BISON rules/actions  (Oracle compatible)
  *
- * Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+ * Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
  * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
@@ -850,6 +850,8 @@ static void determineLanguage(List *options);
 %token <keyword> NAN_P INFINITE_P
 
 %token <keyword> PARAMSLENGTH
+
+%token <keyword> LISTAGG
 
 %type <node> CreatePackageStmt CreatePackageBodyStmt AlterPackageStmt
 %type <node> package_proper_item
@@ -17064,12 +17066,25 @@ a_expr:		c_expr									{ $$ = $1; }
 
 			| a_expr LIKE a_expr
 				{
+					Node	   *pattern = $3;
+					A_Const    *aconst = IsA(pattern, A_Const) ?
+						(A_Const *) pattern : NULL;
+
+					/* Only plain string constants can safely skip conversion. */
+					if (aconst == NULL || aconst->isnull ||
+						!IsA(&aconst->val, String) ||
+						strchr(strVal(&aconst->val), '\\') != NULL)
+						pattern = (Node *) makeFuncCall(OracleSystemFuncName("like_escape"),
+														   list_make1(pattern),
+														   COERCE_EXPLICIT_CALL,
+														   @2);
+
 					$$ = (Node *) makeSimpleA_Expr(AEXPR_LIKE, "~~",
-												   $1, $3, @2);
+												   $1, pattern, @2);
 				}
 			| a_expr LIKE a_expr ESCAPE a_expr					%prec LIKE
 				{
-					FuncCall   *n = makeFuncCall(SystemFuncName("like_escape"),
+					FuncCall   *n = makeFuncCall(OracleSystemFuncName("like_escape"),
 												 list_make2($3, $5),
 												 COERCE_EXPLICIT_CALL,
 												 @2);
@@ -17078,12 +17093,25 @@ a_expr:		c_expr									{ $$ = $1; }
 				}
 			| a_expr NOT_LA LIKE a_expr							%prec NOT_LA
 				{
+					Node	   *pattern = $4;
+					A_Const    *aconst = IsA(pattern, A_Const) ?
+						(A_Const *) pattern : NULL;
+
+					/* Only plain string constants can safely skip conversion. */
+					if (aconst == NULL || aconst->isnull ||
+						!IsA(&aconst->val, String) ||
+						strchr(strVal(&aconst->val), '\\') != NULL)
+						pattern = (Node *) makeFuncCall(OracleSystemFuncName("like_escape"),
+														   list_make1(pattern),
+														   COERCE_EXPLICIT_CALL,
+														   @2);
+
 					$$ = (Node *) makeSimpleA_Expr(AEXPR_LIKE, "!~~",
-												   $1, $4, @2);
+												   $1, pattern, @2);
 				}
 			| a_expr NOT_LA LIKE a_expr ESCAPE a_expr			%prec NOT_LA
 				{
-					FuncCall   *n = makeFuncCall(SystemFuncName("like_escape"),
+					FuncCall   *n = makeFuncCall(OracleSystemFuncName("like_escape"),
 												 list_make2($4, $6),
 												 COERCE_EXPLICIT_CALL,
 												 @2);
@@ -17870,6 +17898,34 @@ func_expr: func_application within_group_clause filter_clause over_clause
 				}
 			| func_expr_common_subexpr
 				{ $$ = $1; }
+			| LISTAGG '(' func_arg_list ')' within_group_clause filter_clause over_clause
+				{
+					FuncCall   *string_agg_n;
+					FuncCall   *check_n;
+
+					if ($5 == NIL)
+						ereport(ERROR,
+								(errcode(ERRCODE_SYNTAX_ERROR),
+								 errmsg("LISTAGG requires WITHIN GROUP (ORDER BY ...)"),
+								 parser_errposition(@1)));
+
+					/* Supply an empty delimiter for the single-argument form. */
+					if (list_length($3) == 1)
+						$3 = lappend($3, makeStringConst("", @3));
+
+					string_agg_n = makeFuncCall(SystemFuncName("string_agg"),
+												$3, COERCE_EXPLICIT_CALL, @1);
+					string_agg_n->agg_order = $5;
+					string_agg_n->agg_filter = $6;
+					string_agg_n->over = $7;
+
+					/* Enforce Oracle's 4000-byte result limit. */
+					check_n = makeFuncCall(OracleSystemFuncName("ora_listagg_check"),
+										   list_make1((Node *) string_agg_n),
+										   COERCE_EXPLICIT_CALL, @1);
+					$$ = (Node *) check_n;
+				}
+
 		;
 
 /*
@@ -18023,6 +18079,20 @@ func_expr_common_subexpr:
 					$$ = (Node *) makeFuncCall(SystemFuncName("extract"),
 											   $3,
 											   COERCE_SQL_SYNTAX,
+											   @1);
+				}
+			| EXTRACT '(' a_expr ',' a_expr ')'
+				{
+					$$ = (Node *) makeFuncCall(list_make1(makeString("extract")),
+											   list_make2($3, $5),
+											   COERCE_EXPLICIT_CALL,
+											   @1);
+				}
+			| EXTRACT '(' a_expr ',' a_expr ',' a_expr ')'
+				{
+					$$ = (Node *) makeFuncCall(list_make1(makeString("extract")),
+											   list_make3($3, $5, $7),
+											   COERCE_EXPLICIT_CALL,
 											   @1);
 				}
 			/* End - ReqID:SRS-SQL-XML */
@@ -20674,6 +20744,7 @@ reserved_keyword:
 			| LATERAL_P
 			| LEADING
 			| LIMIT
+			| LISTAGG
 			| LOCALTIME
 			| LOCALTIMESTAMP
 			| NAN_P
@@ -20960,6 +21031,7 @@ bare_label_keyword:
 			| LEFT
 			| LEVEL
 			| LIKE
+			| LISTAGG
 			| LISTEN
 			| LOAD
 			| LOCAL

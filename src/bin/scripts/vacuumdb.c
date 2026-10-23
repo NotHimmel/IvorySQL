@@ -4,7 +4,7 @@
  *
  * Portions Copyright (c) 1996-2025, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
- * Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+ * Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
  *
  * src/bin/scripts/vacuumdb.c
  *
@@ -986,10 +986,10 @@ retrieve_objects(PGconn *conn, vacuumingOptions *vacopts,
 							 " AND a.attnum OPERATOR(pg_catalog.>) 0::pg_catalog.int2\n"
 							 " AND NOT a.attisdropped\n"
 							 " AND a.attstattarget IS DISTINCT FROM 0::pg_catalog.int2\n"
+							 " AND NOT p.inherited\n"
 							 " AND NOT EXISTS (SELECT NULL FROM pg_catalog.pg_statistic s\n"
 							 " WHERE s.starelid OPERATOR(pg_catalog.=) a.attrelid\n"
-							 " AND s.staattnum OPERATOR(pg_catalog.=) a.attnum\n"
-							 " AND s.stainherit OPERATOR(pg_catalog.=) p.inherited))\n");
+							 " AND s.staattnum OPERATOR(pg_catalog.=) a.attnum))\n");
 
 		/* inheritance and regular stats */
 		appendPQExpBufferStr(&catalog_query,

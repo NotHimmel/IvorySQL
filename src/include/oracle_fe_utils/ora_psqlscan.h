@@ -14,7 +14,7 @@
  * Copyright:
  * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
- * Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+ * Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
  *
  * src/include/oracle_fe_utils/ora_psqlscan.h
  *
@@ -87,6 +87,8 @@ extern Ora_PsqlScanResult ora_psql_scan(PsqlScanState state,
 extern void ora_psql_scan_reset(PsqlScanState state);
 
 extern void ora_psql_scan_reselect_sql_lexer(PsqlScanState state);
+
+extern int	ora_psql_scan_count_copy_from_stdin(PsqlScanState state);
 
 extern bool ora_psql_scan_in_quote(PsqlScanState state);
 extern bool is_oracle_slash(PsqlScanState state, const char *line);

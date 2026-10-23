@@ -6,7 +6,7 @@
  *
  * Portions Copyright (c) 1996-2025, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
- * Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+ * Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
  *
  * IDENTIFICATION
  *	  src/backend/bootstrap/bootstrap.c
@@ -653,7 +653,7 @@ InsertOneTuple(void)
 
 	elog(DEBUG4, "inserting row with %d columns", numattr);
 
-	tupDesc = CreateTupleDesc(numattr, attrtypes, false, false);
+	tupDesc = CreateTupleDescWithRowId(numattr, attrtypes, false, false);
 	tuple = heap_form_tuple(tupDesc, values, Nulls);
 	pfree(tupDesc);				/* just free's tupDesc, not the attrtypes */
 

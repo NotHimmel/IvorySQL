@@ -3,7 +3,7 @@
  * pl_exec.c		- Executor for the PL/iSQL
  *			  procedural language
  *
- * Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+ * Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
  * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
  *
@@ -24,6 +24,7 @@
 #include "access/htup_details.h"
 #include "access/transam.h"
 #include "access/tupconvert.h"
+#include "catalog/pg_package.h"
 #include "catalog/pg_proc.h"
 #include "catalog/pg_type.h"
 #include "commands/defrem.h"
@@ -112,6 +113,13 @@ static SimpleEcontextStackEntry *simple_econtext_stack = NULL;
  * same way described above for shared_simple_eval_estate.)
  */
 static ResourceOwner shared_simple_eval_resowner = NULL;
+
+/*
+ * Pointer to the estate currently handling an exception. This is used by
+ * DBMS_UTILITY.FORMAT_ERROR_BACKTRACE to access the exception context from
+ * within the exception handler, even when nested function calls occur.
+ */
+static PLiSQL_execstate *exception_handling_estate = NULL;
 
 /*
  * Memory management within a plisql function generally works with three
@@ -1358,6 +1366,56 @@ plisql_exec_event_trigger(PLiSQL_function * func, EventTriggerData *trigdata)
 }
 
 /*
+ * If func is a package member, return its package-qualified name (e.g.
+ * "schema"."package".funcname) for use in error context messages; otherwise
+ * return NULL.
+ *
+ * A package member's fn_signature is only ever the bare routine name (see
+ * quote_qualified_identifier(NULL, funcname) in
+ * plisql_build_subproc_function_internal()), because nothing else about the
+ * package is known at parse time of that string. But the compiler already
+ * resolved and attached the owning package's PackageCacheItem to the
+ * function (func->item, set in pl_subproc_function.c), so we can look the
+ * package up by oid here instead of ever needing to search package body
+ * source text for a matching declaration. Callers that walk
+ * PG_EXCEPTION_CONTEXT (e.g. contrib/pg_owa_util's who_called_me) benefit
+ * directly: the package identity is now in the text they already parse.
+ */
+static char *
+plisql_package_qualified_signature(PLiSQL_function *func)
+{
+	HeapTuple	pkgTup;
+	Form_pg_package pkgStruct;
+	char	   *nspname;
+	char	   *pkgqual;
+	char	   *result;
+
+	if (func->item == NULL)
+		return NULL;
+
+	pkgTup = SearchSysCache1(PKGOID, ObjectIdGetDatum(func->item->pkey));
+	if (!HeapTupleIsValid(pkgTup))
+		return NULL;			/* package concurrently dropped; fall back */
+
+	pkgStruct = (Form_pg_package) GETSTRUCT(pkgTup);
+	nspname = get_namespace_name(pkgStruct->pkgnamespace);
+	if (nspname == NULL)
+	{
+		ReleaseSysCache(pkgTup);
+		return NULL;			/* namespace concurrently dropped */
+	}
+
+	pkgqual = quote_qualified_identifier(nspname, NameStr(pkgStruct->pkgname));
+	ReleaseSysCache(pkgTup);
+	pfree(nspname);
+
+	result = psprintf("%s.%s", pkgqual, func->fn_signature);
+	pfree(pkgqual);
+
+	return result;
+}
+
+/*
  * error context callback to let us supply a call-stack traceback
  */
 static void
@@ -1365,6 +1423,8 @@ plisql_exec_error_callback(void *arg)
 {
 	PLiSQL_execstate *estate = (PLiSQL_execstate *) arg;
 	int			err_lineno;
+	char	   *funcname;
+	char	   *qualified_funcname;
 
 	/*
 	 * If err_var is set, report the variable's declaration line number.
@@ -1378,6 +1438,14 @@ plisql_exec_error_callback(void *arg)
 		err_lineno = estate->err_stmt->lineno;
 	else
 		err_lineno = 0;
+
+	/*
+	 * qualified_funcname, when non-NULL, is a fresh palloc'd string we own
+	 * and must free below; the fn_signature fallback is borrowed from the
+	 * long-lived function cache and must never be freed.
+	 */
+	qualified_funcname = plisql_package_qualified_signature(estate->func);
+	funcname = qualified_funcname != NULL ? qualified_funcname : estate->func->fn_signature;
 
 	if (estate->err_text != NULL)
 	{
@@ -1399,7 +1467,7 @@ plisql_exec_error_callback(void *arg)
 			 * local variable initialization"
 			 */
 			errcontext("PL/iSQL function %s line %d %s",
-					   estate->func->fn_signature,
+					   funcname,
 					   err_lineno,
 					   _(estate->err_text));
 		}
@@ -1410,7 +1478,7 @@ plisql_exec_error_callback(void *arg)
 			 * arguments into local variables"
 			 */
 			errcontext("PL/iSQL function %s %s",
-					   estate->func->fn_signature,
+					   funcname,
 					   _(estate->err_text));
 		}
 	}
@@ -1418,13 +1486,16 @@ plisql_exec_error_callback(void *arg)
 	{
 		/* translator: last %s is a plisql statement type name */
 		errcontext("PL/iSQL function %s line %d at %s",
-				   estate->func->fn_signature,
+				   funcname,
 				   err_lineno,
 				   plisql_stmt_typename(estate->err_stmt));
 	}
 	else
 		errcontext("PL/iSQL function %s",
-				   estate->func->fn_signature);
+				   funcname);
+
+	if (qualified_funcname != NULL)
+		pfree(qualified_funcname);
 }
 
 
@@ -1911,6 +1982,7 @@ exec_stmt_block(PLiSQL_execstate * estate, PLiSQL_stmt_block * block)
 		ResourceOwner oldowner = CurrentResourceOwner;
 		ExprContext *old_eval_econtext = estate->eval_econtext;
 		ErrorData  *save_cur_error = estate->cur_error;
+		PLiSQL_execstate *save_exception_handling_estate = exception_handling_estate;
 		MemoryContext stmt_mcontext;
 
 		estate->err_text = gettext_noop("during statement block entry");
@@ -2062,7 +2134,19 @@ exec_stmt_block(PLiSQL_execstate * estate, PLiSQL_stmt_block * block)
 
 					estate->err_text = NULL;
 
+					/*
+					 * Set exception_handling_estate so that functions called
+					 * from within the exception handler (like DBMS_UTILITY
+					 * package functions) can access the exception context.
+					 */
+					exception_handling_estate = estate;
+
 					rc = exec_stmts(estate, exception->action);
+
+					/*
+					 * Restore exception_handling_estate after handler execution.
+					 */
+					exception_handling_estate = save_exception_handling_estate;
 
 					break;
 				}
@@ -3480,28 +3564,14 @@ exec_stmt_return(PLiSQL_execstate * estate, PLiSQL_stmt_return * stmt)
 				}
 				break;
 
+			case PLISQL_DTYPE_ROW:
 			case PLISQL_DTYPE_REC:
 				{
-					PLiSQL_rec *rec = (PLiSQL_rec *) retvar;
-
-					/* If record is empty, we return NULL not a row of nulls */
-					if (rec->erh && !ExpandedRecordIsEmpty(rec->erh))
-					{
-						estate->retval = ExpandedRecordGetDatum(rec->erh);
-						estate->retisnull = false;
-						estate->rettype = rec->rectypeid;
-					}
-				}
-				break;
-
-			case PLISQL_DTYPE_ROW:
-				{
-					PLiSQL_row *row = (PLiSQL_row *) retvar;
+					/* exec_eval_datum can handle these cases */
 					int32		rettypmod;
 
-					/* We get here if there are multiple OUT parameters */
 					exec_eval_datum(estate,
-									(PLiSQL_datum *) row,
+									retvar,
 									&estate->rettype,
 									&rettypmod,
 									&estate->retval,
@@ -6964,7 +7034,18 @@ plisql_param_compile(ParamListInfo params, Param *param,
 	{
 		bool		isvarlena = (((PLiSQL_var *) datum)->datatype->typlen == -1);
 
-		if (isvarlena && dno == expr->target_param && expr->expr_simple_expr)
+		/*
+		 * dno has just been rebound to the resolved datum's own dno, which
+		 * for a package-qualified reference lives in the package's datum
+		 * namespace, not the calling function's.  plisql_param_eval_var_check
+		 * (below) indexes estate->datums[dno] directly without regard to
+		 * pkgoid, so comparing this dno against expr->target_param (a dno in
+		 * the calling function's namespace) is only meaningful when the
+		 * datum isn't package-qualified; otherwise a coincidental numeric
+		 * match causes it to read an unrelated local variable at runtime.
+		 */
+		if (isvarlena && dno == expr->target_param && expr->expr_simple_expr &&
+			!OidIsValid(((PLiSQL_var *) datum)->pkgoid))
 			scratch.d.cparam.paramfunc = plisql_param_eval_var_check;
 		else if (isvarlena)
 			scratch.d.cparam.paramfunc = plisql_param_eval_var_ro;
@@ -7238,10 +7319,38 @@ plisql_param_eval_var_ro(ExprState *state, ExprEvalStep *op,
 	/*
 	 * Inlined version of exec_eval_datum() ... and while we're at it, force
 	 * expanded datums to read-only.
+	 *
+	 * IMPORTANT (Bug #1124 fix): For varlena types that are NOT expanded
+	 * objects, we must make a copy of the value into the eval_mcontext,
+	 * rather than just returning a pointer to the variable's storage. This is
+	 * because nested function calls (a PL/iSQL feature) can happen during
+	 * expression evaluation, and when they return, they copy back their global
+	 * variables to the parent. This copy-back operation frees the parent's old
+	 * variable storage, which would leave us with a dangling pointer if we had
+	 * just returned var->value directly.
+	 *
+	 * For expanded objects (like composite types), we use
+	 * MakeExpandedObjectReadOnly which handles them properly.
+	 *
+	 * By copying to eval_mcontext here, we ensure the value survives for the
+	 * duration of the expression evaluation, even if the original variable
+	 * storage is freed and reallocated.
 	 */
-	*op->resvalue = MakeExpandedObjectReadOnly(var->value,
-											   var->isnull,
-											   -1);
+	if (!var->isnull && var->datatype->typlen == -1 &&
+		!VARATT_IS_EXTERNAL_EXPANDED(DatumGetPointer(var->value)))
+	{
+		/* Non-expanded varlena type - make a copy in eval_mcontext */
+		MemoryContext oldcxt = MemoryContextSwitchTo(get_eval_mcontext(estate));
+		*op->resvalue = datumCopy(var->value, false, -1);
+		MemoryContextSwitchTo(oldcxt);
+	}
+	else
+	{
+		/* Expanded object, pass-by-value, or null - use standard handling */
+		*op->resvalue = MakeExpandedObjectReadOnly(var->value,
+												   var->isnull,
+												   -1);
+	}
 	*op->resnull = var->isnull;
 
 	/* safety check -- an assertion should be sufficient */
@@ -8416,12 +8525,34 @@ instantiate_empty_record_variable(PLiSQL_execstate * estate, PLiSQL_rec * rec)
 
 	Assert(rec->erh == NULL);	/* else caller error */
 
-	/* If declared type is RECORD, we can't instantiate */
+	/* If declared type is RECORD, check for a known structure via typmod */
 	if (rec->rectypeid == RECORDOID)
+	{
+		if (rec->datatype != NULL && rec->datatype->atttypmod >= 0)
+		{
+			/*
+			 * This record was declared as a package-defined record type whose
+			 * structure was registered via BlessTupleDesc.  Look up the
+			 * TupleDesc by typmod and use it to create the expanded record.
+			 */
+			TupleDesc	tupdesc;
+
+			tupdesc = lookup_rowtype_tupdesc_noerror(RECORDOID,
+													 rec->datatype->atttypmod,
+													 true);
+			if (tupdesc != NULL)
+			{
+				mc = plisql_get_relevantContext(rec->pkgoid, estate->datum_context);
+				rec->erh = make_expanded_record_from_tupdesc(tupdesc, mc);
+				ReleaseTupleDesc(tupdesc);
+				return;
+			}
+		}
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("record \"%s\" is not assigned yet", rec->refname),
 				 errdetail("The tuple structure of a not-yet-assigned record is indeterminate.")));
+	}
 
 	/* Make sure rec->rectypeid is up-to-date before using it */
 	revalidate_rectypeid(rec);
@@ -8673,12 +8804,20 @@ get_cast_hashentry(PLiSQL_execstate * estate,
 		 * If there's no cast path according to the parser, fall back to using
 		 * an I/O coercion; this is semantically dubious but matches plisql's
 		 * historical behavior.  We would need something of the sort for
-		 * UNKNOWN literals in any case.  (This is probably now only reachable
-		 * in the case where srctype is UNKNOWN/RECORD.)
+		 * UNKNOWN literals in any case.  The only case we reject is casting
+		 * to/from INTERNAL.  (Other than that case, this is probably now only
+		 * reachable in the case where srctype is UNKNOWN/RECORD.)
 		 */
 		if (cast_expr == NULL)
 		{
 			CoerceViaIO *iocoerce = makeNode(CoerceViaIO);
+
+			if (srctype == INTERNALOID || dsttype == INTERNALOID)
+				ereport(ERROR,
+						(errcode(ERRCODE_CANNOT_COERCE),
+						 errmsg("cannot cast type %s to %s",
+								format_type_be(srctype),
+								format_type_be(dsttype))));
 
 			iocoerce->arg = (Expr *) placeholder;
 			iocoerce->resulttype = dsttype;
@@ -9893,4 +10032,133 @@ plisql_anonymous_return_out_parameter(PLiSQL_execstate * estate, PLiSQL_function
 	estate->retistuple = true;
 
 	return;
+}
+
+/*
+ * plisql_get_current_exception_context
+ *
+ * Returns the current exception context string if we're in an exception handler,
+ * otherwise returns NULL. This is used by Oracle-compatible functions like
+ * DBMS_UTILITY.FORMAT_ERROR_BACKTRACE.
+ *
+ * The returned string is managed by PL/iSQL and should not be freed by the caller.
+ */
+const char *
+plisql_get_current_exception_context(void)
+{
+	if (exception_handling_estate != NULL &&
+		exception_handling_estate->cur_error != NULL)
+		return exception_handling_estate->cur_error->context;
+	return NULL;
+}
+
+/*
+ * plisql_get_current_exception_message
+ *
+ * Returns the current exception message if we're in an exception handler,
+ * otherwise returns NULL. This is used by DBMS_UTILITY.FORMAT_ERROR_STACK.
+ */
+const char *
+plisql_get_current_exception_message(void)
+{
+	if (exception_handling_estate != NULL &&
+		exception_handling_estate->cur_error != NULL)
+		return exception_handling_estate->cur_error->message;
+	return NULL;
+}
+
+/*
+ * plisql_get_current_exception_sqlerrcode
+ *
+ * Returns the current exception SQLSTATE error code if we're in an exception handler,
+ * otherwise returns 0. This is used by DBMS_UTILITY.FORMAT_ERROR_STACK.
+ */
+int
+plisql_get_current_exception_sqlerrcode(void)
+{
+	if (exception_handling_estate != NULL &&
+		exception_handling_estate->cur_error != NULL)
+		return exception_handling_estate->cur_error->sqlerrcode;
+	return 0;
+}
+
+/*
+ * plisql_get_call_stack
+ *
+ * Returns the current PL/iSQL call stack as a formatted string, one frame
+ * per line as "handle\tlineno\tsignature". Package members' signature is
+ * schema/package-qualified (see plisql_package_qualified_signature()), not
+ * just the bare routine name.
+ *
+ * This walks the error_context_stack looking for PL/iSQL function contexts,
+ * silently skipping any interleaved non-PL/iSQL (e.g. PL/pgSQL) frames --
+ * callers that need every frame in true call order regardless of language
+ * cannot use this function for that purpose.
+ * Used by DBMS_UTILITY.FORMAT_CALL_STACK.
+ *
+ * Returns NULL if not inside any PL/iSQL function.
+ * The returned string is palloc'd in the current memory context.
+ */
+char *
+plisql_get_call_stack(void)
+{
+	ErrorContextCallback *context;
+	StringInfoData buf;
+	bool found_any = false;
+
+	initStringInfo(&buf);
+
+	/* Walk the error context stack */
+	for (context = error_context_stack; context != NULL; context = context->previous)
+	{
+		/* Check if this is a PL/iSQL execution context */
+		if (context->callback == plisql_exec_error_callback)
+		{
+			PLiSQL_execstate *estate = (PLiSQL_execstate *) context->arg;
+			int lineno = 0;
+			char *signature;
+			char *qualified_signature;
+
+			/* Get current line number */
+			if (estate->err_var != NULL)
+				lineno = estate->err_var->lineno;
+			else if (estate->err_stmt != NULL)
+				lineno = estate->err_stmt->lineno;
+
+			/*
+			 * Package members' fn_signature is only ever the bare routine
+			 * name (see plisql_build_subproc_function_internal()); qualify
+			 * it with the owning package's schema/name, same as the
+			 * error-context callback above, so callers of this function
+			 * don't have to re-derive package identity themselves.
+			 *
+			 * qualified_signature, when non-NULL, is a fresh palloc'd
+			 * string we own and must free below; the fn_signature fallback
+			 * is borrowed from the long-lived function cache.
+			 */
+			qualified_signature = plisql_package_qualified_signature(estate->func);
+			signature = qualified_signature != NULL ? qualified_signature : estate->func->fn_signature;
+
+			/* Add to stack output */
+			if (found_any)
+				appendStringInfoChar(&buf, '\n');
+
+			appendStringInfo(&buf, "%p\t%d\t%s",
+							 (void *) estate->func,
+							 lineno,
+							 signature);
+			found_any = true;
+
+			if (qualified_signature != NULL)
+				pfree(qualified_signature);
+		}
+	}
+
+	if (!found_any)
+	{
+		pfree(buf.data);
+		return NULL;
+	}
+
+	return buf.data;
 }

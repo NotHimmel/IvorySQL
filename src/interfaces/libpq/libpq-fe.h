@@ -20,6 +20,7 @@ extern "C"
 {
 #endif
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 
@@ -70,14 +71,6 @@ extern "C"
 #define PG_COPYRES_TUPLES		  0x02	/* Implies PG_COPYRES_ATTRS */
 #define PG_COPYRES_EVENTS		  0x04
 #define PG_COPYRES_NOTICEHOOKS	  0x08
-
-/*
- * Assume bool has been defined if true and false are defined.  
- * This avoids duplicate-typedef errors if this file is included after c.h.
- */
-#if !(defined(true) && defined(false))
-typedef unsigned char bool;
-#endif
 
 /* Application-visible enum types */
 
@@ -751,11 +744,15 @@ typedef struct _PGpromptOAuthDevice
 	int			expires_in;		/* seconds until user code expires */
 } PGpromptOAuthDevice;
 
-/* for PGoauthBearerRequest.async() */
+/*
+ * For PGoauthBearerRequest.async(). This macro just allows clients to avoid
+ * depending on libpq-int.h or Winsock for the "socket" type; it's undefined
+ * immediately below.
+ */
 #ifdef _WIN32
-#define SOCKTYPE uintptr_t		/* avoids depending on winsock2.h for SOCKET */
+#define PQ_SOCKTYPE uintptr_t	/* avoids depending on winsock2.h for SOCKET */
 #else
-#define SOCKTYPE int
+#define PQ_SOCKTYPE int
 #endif
 
 typedef struct PGoauthBearerRequest
@@ -781,10 +778,13 @@ typedef struct PGoauthBearerRequest
 	 * blocking during the original call to the PQAUTHDATA_OAUTH_BEARER_TOKEN
 	 * hook, it may be returned directly, but one of request->async or
 	 * request->token must be set by the hook.
+	 *
+	 * The (PQ_SOCKTYPE *) in the signature is a placeholder for the platform's
+	 * native socket type: (SOCKET *) on Windows, and (int *) everywhere else.
 	 */
 	PostgresPollingStatusType (*async) (PGconn *conn,
 										struct PGoauthBearerRequest *request,
-										SOCKTYPE * altsock);
+										PQ_SOCKTYPE * altsock);
 
 	/*
 	 * Callback to clean up custom allocations. A hook implementation may use
@@ -811,7 +811,7 @@ typedef struct PGoauthBearerRequest
 	void	   *user;
 } PGoauthBearerRequest;
 
-#undef SOCKTYPE
+#undef PQ_SOCKTYPE
 
 extern char *PQencryptPassword(const char *passwd, const char *user);
 extern char *PQencryptPasswordConn(PGconn *conn, const char *passwd, const char *user, const char *algorithm);

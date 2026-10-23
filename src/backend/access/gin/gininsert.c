@@ -152,7 +152,9 @@ typedef struct
 	 * only in the leader process.
 	 */
 	GinLeader  *bs_leader;
-	int			bs_worker_id;
+
+	/* number of participating workers (including leader) */
+	int			bs_num_workers;
 
 	/* used to pass information from workers to leader */
 	double		bs_numtuples;
@@ -479,6 +481,15 @@ ginBuildCallback(Relation index, ItemPointer tid, Datum *values,
 /*
  * ginFlushBuildState
  *		Write all data from BuildAccumulator into the tuplesort.
+ *
+ * The number of TIDs written to the tuplesort at once is limited, to reduce
+ * the amount of memory needed when merging the intermediate results later.
+ * The leader will see up to two chunks per worker, so calculate the limit to
+ * not need more than MaxAllocSize overall.
+ *
+ * We don't need to worry about overflowing maintenance_work_mem. We can't
+ * build chunks larger than work_mem, and that limit was set so that workers
+ * produce sufficiently small chunks.
  */
 static void
 ginFlushBuildState(GinBuildState *buildstate, Relation index)
@@ -489,6 +500,11 @@ ginFlushBuildState(GinBuildState *buildstate, Relation index)
 	uint32		nlist;
 	OffsetNumber attnum;
 	TupleDesc	tdesc = RelationGetDescr(index);
+	uint32		maxlen;
+
+	/* maximum number of TIDs per chunk (two chunks per worker) */
+	maxlen = MaxAllocSize / sizeof(ItemPointerData);
+	maxlen /= (2 * buildstate->bs_num_workers);
 
 	ginBeginBAScan(&buildstate->accum);
 	while ((list = ginGetBAEntry(&buildstate->accum,
@@ -497,20 +513,31 @@ ginFlushBuildState(GinBuildState *buildstate, Relation index)
 		/* information about the key */
 		Form_pg_attribute attr = TupleDescAttr(tdesc, (attnum - 1));
 
-		/* GIN tuple and tuple length */
-		GinTuple   *tup;
-		Size		tuplen;
+		/* start of the chunk */
+		uint32		offset = 0;
 
-		/* there could be many entries, so be willing to abort here */
-		CHECK_FOR_INTERRUPTS();
+		/* split the entry into smaller chunk with up to maxlen items */
+		while (offset < nlist)
+		{
+			/* GIN tuple and tuple length */
+			GinTuple   *tup;
+			Size		tuplen;
+			uint32		len = Min(maxlen, nlist - offset);
 
-		tup = _gin_build_tuple(attnum, category,
-							   key, attr->attlen, attr->attbyval,
-							   list, nlist, &tuplen);
+			/* there could be many entries, so be willing to abort here */
+			CHECK_FOR_INTERRUPTS();
 
-		tuplesort_putgintuple(buildstate->bs_worker_sort, tup, tuplen);
+			tup = _gin_build_tuple(attnum, category,
+								   key, attr->attlen, attr->attbyval,
+								   &list[offset], len,
+								   &tuplen);
 
-		pfree(tup);
+			offset += len;
+
+			tuplesort_putgintuple(buildstate->bs_worker_sort, tup, tuplen);
+
+			pfree(tup);
+		}
 	}
 
 	MemoryContextReset(buildstate->tmpCtx);
@@ -1840,9 +1867,6 @@ _gin_process_worker_data(GinBuildState *state, Tuplesortstate *worker_sort,
 
 	tuplesort_performsort(state->bs_worker_sort);
 
-	/* reset the number of GIN tuples produced by this worker */
-	state->bs_numtuples = 0;
-
 	if (progress)
 		pgstat_progress_update_param(PROGRESS_CREATEIDX_SUBPHASE,
 									 PROGRESS_GIN_PHASE_MERGE_1);
@@ -2013,6 +2037,9 @@ _gin_parallel_scan_and_build(GinBuildState *state,
 	/* remember how much space is allowed for the accumulated entries */
 	state->work_mem = (sortmem / 2);
 
+	/* remember how many workers participate in the build */
+	state->bs_num_workers = ginshared->scantuplesortstates;
+
 	/* Begin "partial" tuplesort */
 	state->bs_sortstate = tuplesort_begin_index_gin(heap, index,
 													state->work_mem,
@@ -2119,6 +2146,11 @@ _gin_parallel_build_main(dsm_segment *seg, shm_toc *toc)
 	/* initialize the GIN build state */
 	initGinState(&buildstate.ginstate, indexRel);
 	buildstate.indtuples = 0;
+
+	/* Initialize counters used to report tuple counts to the leader */
+	buildstate.bs_numtuples = 0;
+	buildstate.bs_reltuples = 0;
+
 	memset(&buildstate.buildStats, 0, sizeof(GinStatsData));
 	memset(&buildstate.tid, 0, sizeof(ItemPointerData));
 

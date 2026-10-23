@@ -14,7 +14,7 @@
  *
  * Portions Copyright (c) 1996-2025, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
- * Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+ * Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
  *
  * src/include/nodes/parsenodes.h
  *
@@ -1284,7 +1284,7 @@ typedef struct RangeTblEntry
 	 * Fields valid for a GROUP RTE (else NIL):
 	 */
 	/* list of grouping expressions */
-	List	   *groupexprs pg_node_attr(query_jumble_ignore);
+	List	   *groupexprs;
 
 	/*
 	 * Fields valid in all RTEs:
@@ -3525,6 +3525,7 @@ typedef struct CreateStatsStmt
 	char	   *stxcomment;		/* comment to apply to stats, or NULL */
 	bool		transformed;	/* true when transformStatsStmt is finished */
 	bool		if_not_exists;	/* do nothing if stats name already exists */
+	Oid			owner;			/* OID of owner, or InvalidOid for default */
 } CreateStatsStmt;
 
 /*

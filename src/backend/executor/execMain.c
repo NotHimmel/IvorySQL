@@ -28,7 +28,7 @@
  *
  * Portions Copyright (c) 1996-2025, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
- * Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+ * Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
  *
  *
  * IDENTIFICATION
@@ -883,21 +883,25 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 		foreach(l, plannedstmt->rowMarks)
 		{
 			PlanRowMark *rc = (PlanRowMark *) lfirst(l);
+			RangeTblEntry *rte = exec_rt_fetch(rc->rti, estate);
 			Oid			relid;
 			Relation	relation;
 			ExecRowMark *erm;
 
+			/* ignore "parent" rowmarks; they are irrelevant at runtime */
+			if (rc->isParent)
+				continue;
+
 			/*
-			 * Ignore "parent" rowmarks, because they are irrelevant at
-			 * runtime.  Also ignore the rowmarks belonging to child tables
-			 * that have been pruned in ExecDoInitialPruning().
+			 * Also ignore rowmarks belonging to child tables that have been
+			 * pruned in ExecDoInitialPruning().
 			 */
-			if (rc->isParent ||
+			if (rte->rtekind == RTE_RELATION &&
 				!bms_is_member(rc->rti, estate->es_unpruned_relids))
 				continue;
 
 			/* get relation's OID (will produce InvalidOid if subquery) */
-			relid = exec_rt_fetch(rc->rti, estate)->relid;
+			relid = rte->relid;
 
 			/* open relation, if we need to access it for this mark type */
 			switch (rc->markType)
@@ -1020,7 +1024,7 @@ InitPlan(QueryDesc *queryDesc, int eflags)
 			TupleTableSlot *slot;
 
 			slot = ExecInitExtraTupleSlot(estate, NULL, &TTSOpsVirtual);
-			j = ExecInitJunkFilter(planstate->plan->targetlist, tupType->tdhasrowid,
+			j = ExecInitJunkFilterWithRowId(planstate->plan->targetlist, tupType->tdhasrowid,
 								   slot);
 			estate->es_junkFilter = j;
 
@@ -1329,10 +1333,9 @@ InitResultRelInfo(ResultRelInfo *resultRelInfo,
  *		Get a ResultRelInfo for a trigger target relation.
  *
  * Most of the time, triggers are fired on one of the result relations of the
- * query, and so we can just return a member of the es_result_relations array,
- * or the es_tuple_routing_result_relations list (if any). (Note: in self-join
- * situations there might be multiple members with the same OID; if so it
- * doesn't matter which one we pick.)
+ * query, and so we can just return a suitable one we already made and stored
+ * in the es_opened_result_relations or es_tuple_routing_result_relations
+ * Lists.
  *
  * However, it is sometimes necessary to fire triggers on other relations;
  * this happens mainly when an RI update trigger queues additional triggers
@@ -1352,11 +1355,20 @@ ExecGetTriggerResultRel(EState *estate, Oid relid,
 	Relation	rel;
 	MemoryContext oldcontext;
 
+	/*
+	 * Before creating a new ResultRelInfo, check if we've already made and
+	 * cached one for this relation.  We must ensure that the given
+	 * 'rootRelInfo' matches the one stored in the cached ResultRelInfo as
+	 * trigger handling for partitions can result in mixed requirements for
+	 * what ri_RootResultRelInfo is set to.
+	 */
+
 	/* Search through the query result relations */
 	foreach(l, estate->es_opened_result_relations)
 	{
 		rInfo = lfirst(l);
-		if (RelationGetRelid(rInfo->ri_RelationDesc) == relid)
+		if (RelationGetRelid(rInfo->ri_RelationDesc) == relid &&
+			rInfo->ri_RootResultRelInfo == rootRelInfo)
 			return rInfo;
 	}
 
@@ -1367,7 +1379,8 @@ ExecGetTriggerResultRel(EState *estate, Oid relid,
 	foreach(l, estate->es_tuple_routing_result_relations)
 	{
 		rInfo = (ResultRelInfo *) lfirst(l);
-		if (RelationGetRelid(rInfo->ri_RelationDesc) == relid)
+		if (RelationGetRelid(rInfo->ri_RelationDesc) == relid &&
+			rInfo->ri_RootResultRelInfo == rootRelInfo)
 			return rInfo;
 	}
 
@@ -1375,7 +1388,8 @@ ExecGetTriggerResultRel(EState *estate, Oid relid,
 	foreach(l, estate->es_trig_target_relations)
 	{
 		rInfo = (ResultRelInfo *) lfirst(l);
-		if (RelationGetRelid(rInfo->ri_RelationDesc) == relid)
+		if (RelationGetRelid(rInfo->ri_RelationDesc) == relid &&
+			rInfo->ri_RootResultRelInfo == rootRelInfo)
 			return rInfo;
 	}
 	/* Nope, so we need a new one */
@@ -3141,6 +3155,9 @@ EvalPlanQualStart(EPQState *epqstate, Plan *planTree)
 	rcestate->es_part_prune_states = parentestate->es_part_prune_states;
 	rcestate->es_part_prune_results = parentestate->es_part_prune_results;
 
+	/* We'll also borrow the es_partition_directory from the parent state */
+	rcestate->es_partition_directory = parentestate->es_partition_directory;
+
 	/*
 	 * Initialize private state information for each SubPlan.  We must do this
 	 * before running ExecInitNode on the main query tree, since
@@ -3257,6 +3274,13 @@ EvalPlanQualEnd(EPQState *epqstate)
 	ExecCloseResultRelations(estate);
 
 	MemoryContextSwitchTo(oldcontext);
+
+	/*
+	 * NULLify the partition directory before freeing the executor state.
+	 * Since EvalPlanQualStart() just borrowed the parent EState's directory,
+	 * we'd better leave it up to the parent to delete it.
+	 */
+	estate->es_partition_directory = NULL;
 
 	FreeExecutorState(estate);
 

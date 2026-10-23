@@ -36,7 +36,10 @@
  * certain other system catalogs, such as pg_namespace; but for them, our
  * response is just to invalidate all plans.  We expect updates on those
  * catalogs to be infrequent enough that more-detailed tracking is not worth
- * the effort.
+ * the effort.  We likewise watch pg_authid, pg_auth_members, and
+ * pg_database, which can change which row-level security policies apply.
+ * Since those are shared catalogs whose inval events reach every backend
+ * in the cluster, we invalidate only the role-dependent plans.
  *
  * In addition to full-fledged query plans, we provide a facility for
  * detecting invalidations of simple scalar expressions.  This is fairly
@@ -46,7 +49,7 @@
  *
  * Portions Copyright (c) 1996-2025, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
- * Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+ * Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
  *
  * IDENTIFICATION
  *	  src/backend/utils/cache/plancache.c
@@ -68,6 +71,7 @@
 #include "storage/lmgr.h"
 #include "tcop/pquery.h"
 #include "tcop/utility.h"
+#include "utils/acl.h"
 #include "utils/inval.h"
 #include "utils/memutils.h"
 #include "utils/resowner.h"
@@ -108,6 +112,7 @@ static bool ScanQueryWalker(Node *node, bool *acquire);
 static TupleDesc PlanCacheComputeResultDesc(List *stmt_list);
 static void PlanCacheRelCallback(Datum arg, Oid relid);
 static void PlanCacheObjectCallback(Datum arg, int cacheid, uint32 hashvalue);
+static void PlanCacheRoleCallback(Datum arg, int cacheid, uint32 hashvalue);
 static void PlanCacheSysCallback(Datum arg, int cacheid, uint32 hashvalue);
 
 static void PlanCachePackageBodyCallback(Datum arg, int cacheid, uint32 hashvalue);
@@ -159,6 +164,9 @@ InitPlanCache(void)
 	CacheRegisterSyscacheCallback(FOREIGNDATAWRAPPEROID, PlanCacheSysCallback, (Datum) 0);
 	CacheRegisterSyscacheCallback(PKGOID, PlanCacheObjectCallback, (Datum) 0);
 	CacheRegisterSyscacheCallback(PKGBODYPKGOID, PlanCachePackageBodyCallback, (Datum) 0);
+	CacheRegisterSyscacheCallback(AUTHMEMROLEMEM, PlanCacheRoleCallback, (Datum) 0);
+	CacheRegisterSyscacheCallback(AUTHOID, PlanCacheRoleCallback, (Datum) 0);
+	CacheRegisterSyscacheCallback(DATABASEOID, PlanCacheRoleCallback, (Datum) 0);
 }
 
 /*
@@ -2106,12 +2114,12 @@ PlanCacheComputeResultDesc(List *stmt_list)
 		case PORTAL_ONE_SELECT:
 		case PORTAL_ONE_MOD_WITH:
 			query = linitial_node(Query, stmt_list);
-			return ExecCleanTypeFromTL(query->targetList, false);
+			return ExecCleanTypeFromTLWithRowId(query->targetList, false);
 
 		case PORTAL_ONE_RETURNING:
 			query = QueryListGetPrimaryStmt(stmt_list);
 			Assert(query->returningList);
-			return ExecCleanTypeFromTL(query->returningList, false);
+			return ExecCleanTypeFromTLWithRowId(query->returningList, false);
 
 		case PORTAL_UTIL_SELECT:
 			query = linitial_node(Query, stmt_list);
@@ -2315,6 +2323,56 @@ PlanCacheObjectCallback(Datum arg, int cacheid, uint32 hashvalue)
 				cexpr->is_valid = false;
 				break;
 			}
+		}
+	}
+}
+
+/*
+ * PlanCacheRoleCallback
+ *		Syscache inval callback function for AUTHMEMROLEMEM, AUTHOID, and
+ *		DATABASEOID caches
+ *
+ * Role membership, role attributes, and database ownership (which confers
+ * membership in pg_database_owner) affect planning by way of row-level
+ * security, so invalidate just the role-dependent plans.  For DATABASEOID, we
+ * can ignore changes to other databases' pg_database rows.
+ */
+static void
+PlanCacheRoleCallback(Datum arg, int cacheid, uint32 hashvalue)
+{
+	dlist_iter	iter;
+
+	if (cacheid == DATABASEOID &&
+		hashvalue != cached_db_hash &&
+		hashvalue != 0)
+		return;					/* ignore pg_database changes for other DBs */
+
+	dlist_foreach(iter, &saved_plan_list)
+	{
+		CachedPlanSource *plansource = dlist_container(CachedPlanSource,
+													   node, iter.cur);
+
+		Assert(plansource->magic == CACHEDPLANSOURCE_MAGIC);
+
+		/* No work if it's already invalidated */
+		if (!plansource->is_valid)
+			continue;
+
+		/* Never invalidate if parse/plan would be a no-op anyway */
+		if (!StmtPlanRequiresRevalidation(plansource))
+			continue;
+
+		if (plansource->dependsOnRLS)
+		{
+			/* Invalidate the querytree and generic plan */
+			plansource->is_valid = false;
+			if (plansource->gplan)
+				plansource->gplan->is_valid = false;
+		}
+		else if (plansource->gplan && plansource->gplan->dependsOnRole)
+		{
+			/* Invalidate the generic plan only */
+			plansource->gplan->is_valid = false;
 		}
 	}
 }

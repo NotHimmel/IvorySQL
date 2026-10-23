@@ -6,7 +6,7 @@
  *
  * Portions Copyright (c) 1996-2025, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
- * Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+ * Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
  *
  *
  * IDENTIFICATION
@@ -388,7 +388,8 @@ DOTypeNameCompare(const void *p1, const void *p2)
 		if (cmpval != 0)
 			return cmpval;
 	}
-	else if (obj1->objType == DO_CONSTRAINT)
+	else if (obj1->objType == DO_CONSTRAINT ||
+			 obj1->objType == DO_FK_CONSTRAINT)
 	{
 		ConstraintInfo *robj1 = *(ConstraintInfo *const *) p1;
 		ConstraintInfo *robj2 = *(ConstraintInfo *const *) p2;
@@ -453,6 +454,17 @@ DOTypeNameCompare(const void *p1, const void *p2)
 		/* Sort by publication name, since ->name is just nspname */
 		cmpval = strcmp(psobj1->publication->dobj.name,
 						psobj2->publication->dobj.name);
+		if (cmpval != 0)
+			return cmpval;
+	}
+	else if (obj1->objType == DO_SUBSCRIPTION_REL)
+	{
+		SubRelInfo *srobj1 = *(SubRelInfo *const *) p1;
+		SubRelInfo *srobj2 = *(SubRelInfo *const *) p2;
+
+		/* Sort by subscription name, since (namespace, name) match the rel */
+		cmpval = strcmp(srobj1->subinfo->dobj.name,
+						srobj2->subinfo->dobj.name);
 		if (cmpval != 0)
 			return cmpval;
 	}

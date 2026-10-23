@@ -1,7 +1,7 @@
 /*
  * psql - the PostgreSQL interactive terminal
  *
- * Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+ * Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
  * Copyright (c) 2000-2025, PostgreSQL Global Development Group
  *
  * src/bin/psql/common.h
@@ -40,7 +40,7 @@ extern void SetShellResultVariables(int wait_result);
 extern PGresult *PSQLexec(const char *query);
 extern int	PSQLexecWatch(const char *query, const printQueryOpt *opt, FILE *printQueryFout, int min_rows);
 
-extern bool SendQuery(const char *query);
+extern bool SendQuery(const char *query, int num_copy_from_stdin);
 
 extern bool is_superuser(void);
 extern bool standard_strings(void);

@@ -8,7 +8,7 @@
  * usage.
  *
  * Copyright (c) 2024, PostgreSQL Global Development Group
- * Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+ * Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
  *
  * IDENTIFICATION
  *		src/oracle_test/modules/test_tidstore/test_tidstore.c
@@ -73,6 +73,19 @@ itemptr_cmp(const void *left, const void *right)
 	if (loff > roff)
 		return 1;
 
+	return 0;
+}
+
+static int
+offsetnumber_cmp(const void *a, const void *b)
+{
+	OffsetNumber l = *(const OffsetNumber *) a;
+	OffsetNumber r = *(const OffsetNumber *) b;
+
+	if (l < r)
+		return -1;
+	else if (l > r)
+		return 1;
 	return 0;
 }
 
@@ -179,6 +192,9 @@ do_set_block_offsets(PG_FUNCTION_ARGS)
 
 	noffs = ArrayGetNItems(ARR_NDIM(ta), ARR_DIMS(ta));
 	offs = ((OffsetNumber *) ARR_DATA_PTR(ta));
+
+	/* TidStoreSetBlockOffsets() requires offsets to be strictly ascending. */
+	qsort(offs, noffs, sizeof(OffsetNumber), offsetnumber_cmp);
 
 	/* Set TIDs in the store */
 	TidStoreLockExclusive(tidstore);

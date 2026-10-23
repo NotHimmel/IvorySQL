@@ -105,6 +105,14 @@ SELECT JSON_VALUE(jsonb '[" "]', '$[*]' RETURNING int DEFAULT 2 + 3 ON ERROR);
 SELECT JSON_VALUE(jsonb '["1"]', '$[*]' RETURNING int DEFAULT 2 + 3 ON ERROR);
 SELECT JSON_VALUE(jsonb '["1"]', '$[*]' RETURNING int FORMAT JSON); -- RETURNING FORMAT not allowed
 
+-- A DEFAULT expression must be coerced to the RETURNING type's typmod even
+-- when its base type already matches, but a matching NULL needs no coercion.
+SELECT JSON_VALUE(jsonb '{}', '$.a' RETURNING numeric(4,1) DEFAULT 99999.999 ON EMPTY);
+SELECT JSON_VALUE(jsonb '{}', '$.a' RETURNING varchar(3) DEFAULT 'toolong'::varchar(10) ON EMPTY);
+SELECT JSON_VALUE(jsonb '{}', '$.a' RETURNING numeric(4,1) DEFAULT NULL::numeric ON EMPTY);
+SELECT JSON_VALUE(jsonb '{}', '$.a' RETURNING bit(3) DEFAULT b'10101' ON EMPTY);
+SELECT JSON_VALUE(jsonb '{}', '$.a' RETURNING numeric(4,1) DEFAULT abs(NULL::numeric) ON EMPTY);
+
 -- RETUGNING pseudo-types not allowed
 SELECT JSON_VALUE(jsonb '["1"]', '$[*]' RETURNING record);
 
@@ -450,6 +458,7 @@ SELECT JSON_VALUE(jsonb '{"a": 123}', '$' || '.' || 'a');
 SELECT JSON_VALUE(jsonb '{"a": 123}', '$' || '.' || 'b' DEFAULT 'foo' ON EMPTY);
 SELECT JSON_QUERY(jsonb '{"a": 123}', '$' || '.' || 'a');
 SELECT JSON_QUERY(jsonb '{"a": 123}', '$' || '.' || 'a' WITH WRAPPER);
+SELECT JSON_QUERY(jsonb '{"a": 123}', ('$' || '.' || 'a' || NULL)::date WITH WRAPPER);
 -- Should fail (invalid path)
 SELECT JSON_QUERY(jsonb '{"a": 123}', 'error' || ' ' || 'error');
 
@@ -460,6 +469,7 @@ SELECT JSON_QUERY(NULL FORMAT JSON, '$');
 -- Test non-const jsonpath
 CREATE TEMP TABLE jsonpaths (path) AS SELECT '$';
 SELECT json_value('"aaa"', path RETURNING json) FROM jsonpaths;
+SELECT json_value('"aaa"', jsonpaths RETURNING json) FROM jsonpaths;
 
 -- Test PASSING argument parsing
 SELECT JSON_QUERY(jsonb 'null', '$xyz' PASSING 1 AS xy);

@@ -5,7 +5,7 @@
  *
  * Portions Copyright (c) 1996-2025, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
- * Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+ * Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
  *
  *
  * IDENTIFICATION
@@ -5688,7 +5688,7 @@ getObjectIdentityParts(const ObjectAddress *object,
 
 				amForm = (Form_pg_auth_members) GETSTRUCT(tup);
 
-				appendStringInfo(&buffer, _("membership of role %s in role %s"),
+				appendStringInfo(&buffer, "membership of role %s in role %s",
 								 GetUserNameFromId(amForm->member, false),
 								 GetUserNameFromId(amForm->roleid, false));
 

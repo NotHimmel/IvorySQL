@@ -237,7 +237,7 @@ ALTER INDEX alter_idx_rename_test RENAME TO alter_idx_rename_test_2;
 ALTER INDEX alter_idx_rename_test_parted RENAME TO alter_idx_rename_test_parted_2;
 SELECT relation::regclass, mode FROM pg_locks
 WHERE pid = pg_backend_pid() AND locktype = 'relation'
-  AND relation::regclass::text LIKE 'alter\_idx%'
+  AND relation::regclass::text LIKE 'alter\_idx%' ESCAPE '\'
 ORDER BY relation::regclass::text COLLATE "C";
 COMMIT;
 BEGIN;
@@ -245,7 +245,7 @@ ALTER INDEX alter_idx_rename_test_idx RENAME TO alter_idx_rename_test_idx_2;
 ALTER INDEX alter_idx_rename_test_parted_idx RENAME TO alter_idx_rename_test_parted_idx_2;
 SELECT relation::regclass, mode FROM pg_locks
 WHERE pid = pg_backend_pid() AND locktype = 'relation'
-  AND relation::regclass::text LIKE 'alter\_idx%'
+  AND relation::regclass::text LIKE 'alter\_idx%' ESCAPE '\'
 ORDER BY relation::regclass::text COLLATE "C";
 COMMIT;
 BEGIN;
@@ -253,7 +253,7 @@ ALTER TABLE alter_idx_rename_test_idx_2 RENAME TO alter_idx_rename_test_idx_3;
 ALTER TABLE alter_idx_rename_test_parted_idx_2 RENAME TO alter_idx_rename_test_parted_idx_3;
 SELECT relation::regclass, mode FROM pg_locks
 WHERE pid = pg_backend_pid() AND locktype = 'relation'
-  AND relation::regclass::text LIKE 'alter\_idx%'
+  AND relation::regclass::text LIKE 'alter\_idx%' ESCAPE '\'
 ORDER BY relation::regclass::text COLLATE "C";
 COMMIT;
 DROP TABLE alter_idx_rename_test_2;
@@ -1158,7 +1158,9 @@ copy attest from stdin;
 \.
 select * from attest;
 copy attest(a) from stdin;
+\.
 copy attest("........pg.dropped.1........") from stdin;
+\.
 copy attest(b,c) from stdin;
 31	32
 \.
@@ -2338,6 +2340,14 @@ ALTER TABLE test_add_column
 \d test_add_column
 ALTER TABLE test_add_column
 	ADD COLUMN IF NOT EXISTS c5 SERIAL CHECK (c5 > 10);
+ALTER TABLE test_add_column
+	ADD c6 integer; -- omit COLUMN
+ALTER TABLE test_add_column
+	ADD IF NOT EXISTS c6 integer;
+ALTER TABLE test_add_column
+	DROP c6; -- omit COLUMN
+ALTER TABLE test_add_column
+	DROP IF EXISTS c6;
 \d test_add_column*
 DROP TABLE test_add_column;
 \d test_add_column*
@@ -2840,6 +2850,15 @@ ALTER TABLE range_parted2 DETACH PARTITION part_rp100 CONCURRENTLY;
 -- redundant constraint should not be created
 \d part_rp100
 DROP TABLE range_parted2;
+
+-- Test that hash partitions continue to work after they're concurrently
+-- detached (bugs #18371, #19070)
+CREATE TABLE hash_parted2 (a int) PARTITION BY HASH(a);
+CREATE TABLE part_hp PARTITION OF hash_parted2 FOR VALUES WITH (MODULUS 2, REMAINDER 0);
+ALTER TABLE hash_parted2 DETACH PARTITION part_hp CONCURRENTLY;
+DROP TABLE hash_parted2;
+INSERT INTO part_hp VALUES (1);
+DROP TABLE part_hp;
 
 -- Check ALTER TABLE commands for partitioned tables and partitions
 

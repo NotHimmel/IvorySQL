@@ -762,6 +762,26 @@ select * from tbl_rs t1 join
   on true;
 
 --
+-- regression test for bug with parallel-hash-right-semi join
+--
+
+begin;
+
+-- encourage use of parallel plans
+set local parallel_setup_cost=0;
+set local parallel_tuple_cost=0;
+set local min_parallel_table_scan_size=0;
+set local max_parallel_workers_per_gather=4;
+
+-- ensure we don't get parallel hash right semi join
+explain (costs off)
+select * from tenk1 t1
+where exists (select 1 from tenk1 t2 where fivethous = t1.fivethous)
+and t1.fivethous < 5;
+
+rollback;
+
+--
 -- regression test for bug #13908 (hash join with skew tuples & nbatch increase)
 --
 
@@ -1358,6 +1378,16 @@ select * from
   (select 1 as x) ss1 left join (select 2 as y) ss2 on (true),
   lateral (select ss2.y as z limit 1) ss3;
 
+-- Also, we mustn't remove an RTE_RESULT that is the only baserel where a PHV
+-- can be evaluated, even when the PHV's phrels also mention an outer join.
+explain (verbose, costs off)
+select * from (values (1),(2)) v(x)
+  left join (select q from (select 7 as q from (select where false) ss1) ss2
+             left join (select 8 as z) ss3 on true) ss4 on true;
+select * from (values (1),(2)) v(x)
+  left join (select q from (select 7 as q from (select where false) ss1) ss2
+             left join (select 8 as z) ss3 on true) ss4 on true;
+
 -- This example demonstrates the folly of our old "have_dangerous_phv" logic
 begin;
 set local from_collapse_limit to 2;
@@ -1462,6 +1492,30 @@ select * from int4_tbl left join (
   select text 'foo' union all select text 'bar'
 ) ss(x) on true
 where ss.x is null;
+
+-- Test computation of varnullingrels when translating appendrel Var
+begin;
+
+create temp table t_append (a int not null, b int);
+insert into t_append values (1, 1);
+insert into t_append values (2, 3);
+
+explain (verbose, costs off)
+select t1.a, s.a from t_append t1
+  left join t_append t2 on t1.a = t2.b
+  join lateral (
+    select t1.a as a union all select t2.a as a
+  ) s on true
+where s.a is not null;
+
+select t1.a, s.a from t_append t1
+  left join t_append t2 on t1.a = t2.b
+  join lateral (
+    select t1.a as a union all select t2.a as a
+  ) s on true
+where s.a is not null;
+
+rollback;
 
 --
 -- test inlining of immutable functions
@@ -2187,6 +2241,29 @@ from int8_tbl t1
   left join onek t4
     on t2.q2 < t3.unique2;
 
+-- bug #19460: we need to clean up RestrictInfos more than we had been doing
+explain (costs off)
+select * from
+  (select 1::int as id) as lhs
+full join
+  (select dummy_source.id
+   from (select null::int as id) as dummy_source
+   left join (select a.id from a where a.id = 42) as sub
+   on sub.id = dummy_source.id
+  ) as rhs
+on lhs.id = rhs.id;
+
+explain (costs off)
+select * from
+  (select 1::int as id) as lhs
+full join
+  (select dummy_source.id
+   from (select 2::int as id) as dummy_source
+   left join (select a.id from a) as sub
+   on sub.id = dummy_source.id
+  ) as rhs
+on lhs.id = rhs.id;
+
 -- More tests of correct placement of pseudoconstant quals
 
 -- simple constant-false condition
@@ -2280,6 +2357,25 @@ CREATE TEMP TABLE parted_b1 partition of parted_b for values from (0) to (10);
 -- test join removals on a partitioned table
 explain (costs off)
 select a.* from a left join parted_b pb on a.b_id = pb.id;
+
+-- test that clauses that still embed PHVs are not referencing the removed
+-- relation when rebuilt for a partition of the kept relation
+explain (costs off)
+select 1 from (select t1.id from parted_b t1 left join parted_b t2 on t1.id = t2.id) s
+where s.id = 1 group by ();
+
+explain (costs off)
+select 1 from parted_b t1
+  join (select t2.id from parted_b t2 left join parted_b t3 on t2.id = t3.id) s
+  on t1.id = s.id
+group by ();
+
+-- likewise for a PHV embedded in an OR join clause
+explain (costs off)
+select 1 from parted_b t1
+  join (select t2.id from parted_b t2 left join parted_b t3 on t2.id = t3.id) s
+  on (t1.id = 1 and s.id = 2) or (t1.id = 3 and s.id = 4)
+group by ();
 
 rollback;
 
@@ -3040,6 +3136,12 @@ SELECT * FROM
 (SELECT n2.a FROM sj n1, sj n2 WHERE n1.a <> n2.a) q0, sl
 WHERE q0.a = 1;
 
+-- Do not forget to replace relid in bare Var join clause (bug #19435)
+ALTER TABLE sl ADD COLUMN bool_col boolean;
+EXPLAIN (COSTS OFF)
+SELECT 1 AS c1 FROM sl sl1 LEFT JOIN (sl AS sl2 NATURAL JOIN sl AS sl3)
+  ON sl2.bool_col LEFT JOIN sl AS sl4 ON sl2.bool_col;
+
 -- Check optimization disabling if it will violate special join conditions.
 -- Two identical joined relations satisfies self join removal conditions but
 -- stay in different special join infos.
@@ -3718,6 +3820,16 @@ SELECT 1 FROM group_tbl t1
 GROUP BY s.c1, s.c2;
 
 DROP TABLE group_tbl;
+
+-- Test that we ignore PlaceHolderVars when looking up statistics
+EXPLAIN (COSTS OFF)
+SELECT t1.unique1 FROM tenk1 t1 LEFT JOIN
+  (SELECT *, 42 AS phv FROM tenk1 t2) ss ON t1.unique2 = ss.unique2
+WHERE ss.unique1 = ss.phv AND t1.unique1 < 100;
+
+SELECT t1.unique1 FROM tenk1 t1 LEFT JOIN
+  (SELECT *, 42 AS phv FROM tenk1 t2) ss ON t1.unique2 = ss.unique2
+WHERE ss.unique1 = ss.phv AND t1.unique1 < 100;
 
 --
 -- Test for a nested loop join involving index scan, transforming OR-clauses

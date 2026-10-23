@@ -5,7 +5,7 @@
  *
  * Portions Copyright (c) 1996-2025, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
- * Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+ * Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
  *
  *
  * IDENTIFICATION
@@ -362,6 +362,34 @@ ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
 								   &declared_arg_types, &argdefaults);
 
 	cancel_parser_errposition_callback(&pcbstate);
+
+	/*
+	 * If we found a package function/procedure or subprocedure, the fargs
+	 * list may have been reordered and expanded with default arguments. We
+	 * need to rebuild the actual_arg_types array to match the new argument
+	 * order, otherwise type coercion will fail when trying to match reordered
+	 * arguments.
+	 *
+	 * For subprocedures, the fix in pl_subproc_function.c also rebuilds
+	 * true_typeids (declared_arg_types) in declared order after reordering,
+	 * so that both arrays match the reordered fargs.
+	 */
+	if ((function_from == FUNC_FROM_PACKAGE ||
+		 function_from == FUNC_FROM_SUBPROCFUNC) &&
+		fdresult != FUNCDETAIL_NOTFOUND)
+	{
+		ListCell   *lc;
+		int			i = 0;
+
+		foreach(lc, fargs)
+		{
+			Node	   *arg = lfirst(lc);
+
+			actual_arg_types[i++] = exprType(arg);
+		}
+		/* Update nargs to reflect the reordered/expanded argument list */
+		nargs = i;
+	}
 
 	/*
 	 * Check for various wrong-kind-of-routine cases.
@@ -804,6 +832,32 @@ ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
 											   rettype,
 											   false);
 
+	/*
+	 * Reject any attempt to call a function that takes or returns type
+	 * internal from SQL.  (The FUNCDETAIL_COERCION case does not reach this
+	 * check because of the early return above, but that's okay because we
+	 * disallow coercions to or from type internal.)  Note that we are
+	 * checking the resolved argument and result types, so this will reject
+	 * calls to polymorphic functions that pass internal-type arguments.  The
+	 * casting rules should prevent that anyway, since we won't cast internal
+	 * to any polymorphic type, but no harm in being doubly sure.
+	 */
+	for (int i = 0; i < nargsplusdefs; i++)
+	{
+		if (declared_arg_types[i] == INTERNALOID)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("functions accepting type \"%s\" cannot be called explicitly",
+							"internal"),
+					 parser_errposition(pstate, location)));
+	}
+	if (rettype == INTERNALOID)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("functions returning type \"%s\" cannot be called explicitly",
+						"internal"),
+				 parser_errposition(pstate, location)));
+
 	/* perform the necessary typecasting of arguments */
 	make_fn_arguments(pstate, fargs, actual_arg_types, declared_arg_types);
 
@@ -985,6 +1039,22 @@ ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
 		aggref->location = location;
 
 		/*
+		 * The argument-count limit for aggregates is one less than for other
+		 * kinds of functions (cf. AggregateCreate).  Now that we know it's an
+		 * aggregate, apply the stricter limit.  We need an explicit check
+		 * because hypothetical-set aggregates don't have a fixed number of
+		 * arguments, so having matched the pg_proc entry proves nothing.
+		 */
+		if (list_length(fargs) > FUNC_MAX_ARGS - 1)
+			ereport(ERROR,
+					(errcode(ERRCODE_TOO_MANY_ARGUMENTS),
+					 errmsg_plural("aggregates cannot have more than %d argument",
+								   "aggregates cannot have more than %d arguments",
+								   FUNC_MAX_ARGS - 1,
+								   FUNC_MAX_ARGS - 1),
+					 parser_errposition(pstate, location)));
+
+		/*
 		 * Reject attempt to call a parameterless aggregate without (*)
 		 * syntax.  This is mere pedantry but some folks insisted ...
 		 */
@@ -1047,6 +1117,19 @@ ParseFuncOrColumn(ParseState *pstate, List *funcname, List *fargs,
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("DISTINCT is not implemented for window functions"),
+					 parser_errposition(pstate, location)));
+
+		/*
+		 * As above, enforce the correct argument-count limit if it's really
+		 * an aggregate.
+		 */
+		if (wfunc->winagg && list_length(fargs) > FUNC_MAX_ARGS - 1)
+			ereport(ERROR,
+					(errcode(ERRCODE_TOO_MANY_ARGUMENTS),
+					 errmsg_plural("aggregates cannot have more than %d argument",
+								   "aggregates cannot have more than %d arguments",
+								   FUNC_MAX_ARGS - 1,
+								   FUNC_MAX_ARGS - 1),
 					 parser_errposition(pstate, location)));
 
 		/*
@@ -2201,9 +2284,7 @@ ParseComplexProjection(ParseState *pstate, const char *funcname, Node *first_arg
 	{
 		ParseNamespaceItem *nsitem;
 
-		nsitem = GetNSItemByRangeTablePosn(pstate,
-										   ((Var *) first_arg)->varno,
-										   ((Var *) first_arg)->varlevelsup);
+		nsitem = GetNSItemByVar(pstate, (Var *) first_arg);
 		/* Return a Var if funcname matches a column, else NULL */
 		return scanNSItemForColumn(pstate, nsitem,
 								   ((Var *) first_arg)->varlevelsup,

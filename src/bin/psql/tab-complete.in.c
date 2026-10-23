@@ -1,7 +1,7 @@
 /*
  * psql - the PostgreSQL interactive terminal
  *
- * Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+ * Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
  * Copyright (c) 2000-2025, PostgreSQL Global Development Group
  *
  * src/bin/psql/tab-complete.in.c
@@ -2922,7 +2922,7 @@ match_previous_words(int pattern_id,
 	/* ALTER TABLE ALTER [COLUMN] <foo> SET */
 	else if (Matches("ALTER", "TABLE", MatchAny, "ALTER", "COLUMN", MatchAny, "SET") ||
 			 Matches("ALTER", "TABLE", MatchAny, "ALTER", MatchAny, "SET"))
-		COMPLETE_WITH("(", "COMPRESSION", "DATA TYPE", "DEFAULT", "EXPRESSION", "GENERATED", "NOT NULL", "STATISTICS", "STORAGE", "INVISIBLE"
+		COMPLETE_WITH("(", "COMPRESSION", "DATA TYPE", "DEFAULT", "EXPRESSION", "GENERATED", "NOT NULL", "STATISTICS", "STORAGE", "INVISIBLE",
 		/* a subset of ALTER SEQUENCE options */
 					  "INCREMENT", "MINVALUE", "MAXVALUE", "START", "NO", "CACHE", "CYCLE");
 	/* ALTER TABLE ALTER [COLUMN] <foo> SET ( */
@@ -3144,6 +3144,9 @@ match_previous_words(int pattern_id,
 		else if (TailMatches("VERBOSE|SKIP_LOCKED"))
 			COMPLETE_WITH("ON", "OFF");
 	}
+	else if (Matches("ANALYZE", "(*)"))
+		COMPLETE_WITH_SCHEMA_QUERY_PLUS(Query_for_list_of_analyzables,
+										"ONLY");
 	else if (Matches("ANALYZE", MatchAnyN, "("))
 		/* "ANALYZE (" should be caught above, so assume we want columns */
 		COMPLETE_WITH_ATTR(prev2_wd);
@@ -5201,24 +5204,6 @@ match_previous_words(int pattern_id,
 										"VERBOSE",
 										"ANALYZE",
 										"ONLY");
-	else if (Matches("VACUUM", "FULL"))
-		COMPLETE_WITH_SCHEMA_QUERY_PLUS(Query_for_list_of_vacuumables,
-										"FREEZE",
-										"VERBOSE",
-										"ANALYZE",
-										"ONLY");
-	else if (Matches("VACUUM", MatchAnyN, "FREEZE"))
-		COMPLETE_WITH_SCHEMA_QUERY_PLUS(Query_for_list_of_vacuumables,
-										"VERBOSE",
-										"ANALYZE",
-										"ONLY");
-	else if (Matches("VACUUM", MatchAnyN, "VERBOSE"))
-		COMPLETE_WITH_SCHEMA_QUERY_PLUS(Query_for_list_of_vacuumables,
-										"ANALYZE",
-										"ONLY");
-	else if (Matches("VACUUM", MatchAnyN, "ANALYZE"))
-		COMPLETE_WITH_SCHEMA_QUERY_PLUS(Query_for_list_of_vacuumables,
-										"ONLY");
 	else if (HeadMatches("VACUUM", "(*") &&
 			 !HeadMatches("VACUUM", "(*)"))
 	{
@@ -5238,6 +5223,27 @@ match_previous_words(int pattern_id,
 		else if (TailMatches("INDEX_CLEANUP"))
 			COMPLETE_WITH("AUTO", "ON", "OFF");
 	}
+	else if (Matches("VACUUM", "(*)"))
+		COMPLETE_WITH_SCHEMA_QUERY_PLUS(Query_for_list_of_vacuumables,
+										"ONLY");
+	else if (Matches("VACUUM", "FULL"))
+		COMPLETE_WITH_SCHEMA_QUERY_PLUS(Query_for_list_of_vacuumables,
+										"FREEZE",
+										"VERBOSE",
+										"ANALYZE",
+										"ONLY");
+	else if (Matches("VACUUM", MatchAnyN, "FREEZE"))
+		COMPLETE_WITH_SCHEMA_QUERY_PLUS(Query_for_list_of_vacuumables,
+										"VERBOSE",
+										"ANALYZE",
+										"ONLY");
+	else if (Matches("VACUUM", MatchAnyN, "VERBOSE"))
+		COMPLETE_WITH_SCHEMA_QUERY_PLUS(Query_for_list_of_vacuumables,
+										"ANALYZE",
+										"ONLY");
+	else if (Matches("VACUUM", MatchAnyN, "ANALYZE"))
+		COMPLETE_WITH_SCHEMA_QUERY_PLUS(Query_for_list_of_vacuumables,
+										"ONLY");
 	else if (Matches("VACUUM", MatchAnyN, "("))
 		/* "VACUUM (" should be caught above, so assume we want columns */
 		COMPLETE_WITH_ATTR(prev2_wd);
@@ -5326,7 +5332,7 @@ match_previous_words(int pattern_id,
 	else if (TailMatchesCS("\\dew*"))
 		COMPLETE_WITH_QUERY(Query_for_list_of_fdws);
 	else if (TailMatchesCS("\\df*"))
-		COMPLETE_WITH_VERSIONED_SCHEMA_QUERY(Query_for_list_of_functions);
+		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_routines);
 	else if (HeadMatchesCS("\\df*"))
 		COMPLETE_WITH_SCHEMA_QUERY(Query_for_list_of_datatypes);
 

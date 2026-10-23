@@ -18,7 +18,7 @@
  * This file contains the implementation of Oracle's
  * character data type related built-in functions.
  *
- * Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+ * Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
  *
  * contrib/ivorysql_ora/src/builtin_functions/character_datatype_functions.c
  *
@@ -37,6 +37,7 @@
 #include "miscadmin.h"
 #include "regex/regex.h"
 #include "utils/builtins.h"
+#include "utils/fmgrprotos.h"
 #include "utils/numeric.h"
 
 
@@ -58,6 +59,8 @@ PG_FUNCTION_INFO_V1(ora_regexp_instr);
 PG_FUNCTION_INFO_V1(ora_regexp_like);
 PG_FUNCTION_INFO_V1(ora_regexp_like_no_flags);
 PG_FUNCTION_INFO_V1(ora_regexp_count);
+PG_FUNCTION_INFO_V1(ora_substr_no_length);
+PG_FUNCTION_INFO_V1(ora_substr);
 PG_FUNCTION_INFO_V1(ora_substrb_no_length);
 PG_FUNCTION_INFO_V1(ora_substrb);
 PG_FUNCTION_INFO_V1(ora_replace);
@@ -68,6 +71,9 @@ PG_FUNCTION_INFO_V1(oracle_instr_4);
 PG_FUNCTION_INFO_V1(ora_asciistr);
 PG_FUNCTION_INFO_V1(ora_to_multi_byte);
 PG_FUNCTION_INFO_V1(ora_to_single_byte);
+PG_FUNCTION_INFO_V1(ora_like_escape_noescape);
+PG_FUNCTION_INFO_V1(ora_like_escape);
+PG_FUNCTION_INFO_V1(ora_listagg_check);
 
 #define PG_STR_GET_TEXT(str_) \
 	DatumGetTextP(DirectFunctionCall1(textin, CStringGetDatum(str_)))
@@ -86,6 +92,7 @@ typedef struct
 	int			 skiptable[256]; /* skip distance for given mismatched char */
 } TextPositionState;
 
+static text *ora_substr_internal(Datum str, int32 start, int32 length, bool length_not_specified);
 static text *text_substring_byte(Datum str, int32 start, int32 length, bool length_not_specified);
 static void text_position_setup(text *t1, text *t2, TextPositionState *state, bool isbyte);
 static void text_position_cleanup(TextPositionState *state);
@@ -94,6 +101,65 @@ static int text_instring(text *str, text *search_str, int32 position, int32 occu
 static int	text_position_prev(int start_pos, TextPositionState *state);
 static void appendStringInfoText(StringInfo str, const text *t);
 static int getindex(const char **map, char *mbchar, int mblen);
+
+/*
+ * Oracle LIKE has no default escape character.  Let the PostgreSQL pattern
+ * converter quote backslashes for the shared matcher.  Construct the empty
+ * escape string here so Oracle's empty-string-to-NULL conversion cannot
+ * turn an omitted ESCAPE clause into a NULL result.
+ */
+Datum
+ora_like_escape_noescape(PG_FUNCTION_ARGS)
+{
+	text	   *esc = cstring_to_text("");
+	Datum		result;
+
+	result = DirectFunctionCall2(like_escape,
+								 PG_GETARG_DATUM(0), PointerGetDatum(esc));
+	pfree(esc);
+
+	PG_RETURN_DATUM(result);
+}
+
+/* Validate Oracle escape sequences before converting the pattern. */
+Datum
+ora_like_escape(PG_FUNCTION_ARGS)
+{
+	text	   *pat = PG_GETARG_TEXT_PP(0);
+	text	   *esc = PG_GETARG_TEXT_PP(1);
+	const char *p = VARDATA_ANY(pat);
+	const char *e = VARDATA_ANY(esc);
+	int			plen = VARSIZE_ANY_EXHDR(pat);
+	int			elen = VARSIZE_ANY_EXHDR(esc);
+
+	if (elen == 0 || pg_mblen_with_len(e, elen) != elen)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_ESCAPE_SEQUENCE),
+				 errmsg("escape character must be a character string of length 1")));
+
+	while (plen > 0)
+	{
+		int			clen = pg_mblen_with_len(p, plen);
+
+		if (clen == elen && memcmp(p, e, elen) == 0)
+		{
+			p += clen;
+			plen -= clen;
+			if (plen == 0 ||
+				!(*p == '%' || *p == '_' ||
+				  (plen >= elen && memcmp(p, e, elen) == 0)))
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_ESCAPE_SEQUENCE),
+						 errmsg("missing or illegal character following the escape character")));
+			clen = pg_mblen_with_len(p, plen);
+		}
+		p += clen;
+		plen -= clen;
+	}
+
+	PG_RETURN_DATUM(DirectFunctionCall2(like_escape,
+										  PointerGetDatum(pat), PointerGetDatum(esc)));
+}
 
 /*
  * length/lengthb function for 'oracharchar' and 'oracharbyte' type.
@@ -714,8 +780,7 @@ ora_regexp_count(PG_FUNCTION_ARGS)
 	pg_wchar   *data;
 	size_t		data_len;
 	pg_re_flags flags;
-	int			num = 0;
-	bool		flag = false;
+	bool		last_match_empty_at_end = false;
 	
 	if (PG_ARGISNULL(2))
 		PG_RETURN_NULL();
@@ -737,6 +802,7 @@ ora_regexp_count(PG_FUNCTION_ARGS)
 	else
 	{
 		char	*paramstr = NULL;
+
 		match_param = PG_GETARG_TEXT_PP(3);
 		paramstr = text_to_cstring(match_param);
 		if (paramstr && paramstr[0] != '\0')
@@ -747,8 +813,9 @@ ora_regexp_count(PG_FUNCTION_ARGS)
 							 (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 								 errmsg("the 4th argument is illegal parameter for function. the parameter can be one of x, m, i, c, n.")));
 		}
-		ora_parse_re_flags(&flags, match_param);
 	}
+
+	ora_parse_re_flags(&flags, match_param);
 
 	if (PG_ARGISNULL(0) || 
 		PG_ARGISNULL(1))
@@ -757,23 +824,7 @@ ora_regexp_count(PG_FUNCTION_ARGS)
 	s = PG_GETARG_TEXT_PP(0);
 	p = PG_GETARG_TEXT_PP(1);
 	src_text_len = VARSIZE_ANY_EXHDR(s);
-	
-	if (PG_NARGS() == 4)
-	{
-		char	*str = text_to_cstring(s);
-		int 	 len = strlen(str);
-		int 	 i = 0;
-		if (len > 0) 
-		{
-			for (i = 0;i < len; i++)
-			{
-				if (str[i] == '\n')
-					num++;
-			}
-			if (str[len - 1] == '\n')
-				flag = true;
-		}
-	}
+
 	/* Compile RE */
 	re = RE_compile_and_cache(p, flags.cflags, PG_GET_COLLATION());
 
@@ -813,6 +864,9 @@ ora_regexp_count(PG_FUNCTION_ARGS)
 
 		/* Count the number of matches */
 		occurrence_cnt++;
+		last_match_empty_at_end =
+			pmatch[0].rm_so == pmatch[0].rm_eo &&
+			pmatch[0].rm_eo == (pg_regoff_t) data_len;
 
 		/*
 		 * Advance search position.  Normally we start the next search at the
@@ -825,26 +879,89 @@ ora_regexp_count(PG_FUNCTION_ARGS)
 			search_start++;
 	}
 
-	if (flags.cflags == (REG_ICASE | REG_ADVANCED) || (flags.cflags == REG_ADVANCED))
-	{
-		if (!strncmp(p->vl_dat ,".",1))
-			occurrence_cnt -= num;
-	}	
-	if (flags.cflags == (REG_NEWLINE | REG_ADVANCED) && !strncmp(p->vl_dat ,".",1))
-		occurrence_cnt += num;
-	if (flags.cflags == (REG_NEWLINE | REG_ADVANCED) && !strncmp(p->vl_dat ,"^",1))
-	{
-		if (num)
-			occurrence_cnt = num;
-	}
-	if (flags.cflags ==  REG_ADVANCED && !strncmp(p->vl_dat ,"^",1) && flag)
-	{
-		if (num > 1)
-			occurrence_cnt += 1;
-	}
+	/* Do not count the empty line after a trailing newline for a bare ^. */
+	if ((flags.cflags & REG_NLANCH) != 0 &&
+		VARSIZE_ANY_EXHDR(p) == 1 &&
+		*VARDATA_ANY(p) == '^' &&
+		data_len > 0 && data[data_len - 1] == '\n' &&
+		last_match_empty_at_end &&
+		occurrence_cnt > 0)
+		occurrence_cnt--;
+
 	pfree(data);
 
 	PG_RETURN_INT32(occurrence_cnt);
+}
+
+/*
+ * Oracle SUBSTR counts negative positions from the end of the string, treats
+ * zero as one, and returns NULL for an empty result or a nonpositive length.
+ * Normalize the position here so the shared PostgreSQL substring routines
+ * retain their existing semantics for other callers.
+ */
+static text *
+ora_substr_internal(Datum str, int32 start, int32 length,
+					bool length_not_specified)
+{
+	text	   *result;
+
+	if (!length_not_specified && length < 1)
+		return NULL;
+
+	if (start < 0)
+	{
+		int32		nchars;
+
+		/* Count characters, not bytes, including for toasted input. */
+		nchars = DatumGetInt32(DirectFunctionCall1(textlen, str));
+		start = start + nchars + 1;
+		if (start < 1)
+			return NULL;
+	}
+	else if (start == 0)
+		start = 1;
+
+	if (length_not_specified)
+		result = DatumGetTextP(DirectFunctionCall2(text_substr_no_len,
+												 str, Int32GetDatum(start)));
+	else
+		result = DatumGetTextP(DirectFunctionCall3(text_substr,
+													 str, Int32GetDatum(start),
+													 Int32GetDatum(length)));
+
+	if (VARSIZE_ANY_EXHDR(result) == 0)
+	{
+		pfree(result);
+		return NULL;
+	}
+
+	return result;
+}
+
+Datum
+ora_substr(PG_FUNCTION_ARGS)
+{
+	text	   *result;
+
+	result = ora_substr_internal(PG_GETARG_DATUM(0), PG_GETARG_INT32(1),
+								PG_GETARG_INT32(2), false);
+	if (result == NULL)
+		PG_RETURN_NULL();
+
+	PG_RETURN_TEXT_P(result);
+}
+
+Datum
+ora_substr_no_length(PG_FUNCTION_ARGS)
+{
+	text	   *result;
+
+	result = ora_substr_internal(PG_GETARG_DATUM(0), PG_GETARG_INT32(1),
+								0, true);
+	if (result == NULL)
+		PG_RETURN_NULL();
+
+	PG_RETURN_TEXT_P(result);
 }
 
 /********************************************************************
@@ -2315,4 +2432,24 @@ ora_to_single_byte(PG_FUNCTION_ARGS)
 	SET_VARSIZE(dst, VARHDRSZ + dstlen);
 
 	PG_RETURN_TEXT_P(dst);
+}
+
+/*
+ * Enforce the 4000-byte limit on Oracle LISTAGG results.
+ */
+Datum
+ora_listagg_check(PG_FUNCTION_ARGS)
+{
+	text	   *value;
+	int			len;
+
+	if (PG_ARGISNULL(0))
+		PG_RETURN_NULL();
+
+	value = PG_GETARG_TEXT_PP(0);
+	len = VARSIZE_ANY_EXHDR(value);
+	if (len > 4000)
+		elog(ERROR, "result of aggregation exceeds 4000 bytes");
+
+	PG_RETURN_TEXT_P(value);
 }

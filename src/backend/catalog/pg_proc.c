@@ -5,7 +5,7 @@
  *
  * Portions Copyright (c) 1996-2025, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
- * Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+ * Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
  *
  *
  * IDENTIFICATION
@@ -750,12 +750,18 @@ ProcedureCreate(const char *procedureName,
 
 	/* dependency on SQL routine body */
 	if (languageObjectId == SQLlanguageId && prosqlbody)
+	{
+		CheckUsageOnTypesInExpr(prosqlbody, NIL, GetUserId());
 		recordDependencyOnExpr(&myself, prosqlbody, NIL, DEPENDENCY_NORMAL);
+	}
 
 	/* dependency on parameter default expressions */
 	if (parameterDefaults)
+	{
+		CheckUsageOnTypesInExpr((Node *) parameterDefaults, NIL, GetUserId());
 		recordDependencyOnExpr(&myself, (Node *) parameterDefaults,
 							   NIL, DEPENDENCY_NORMAL);
+	}
 
 	/* dependency on owner */
 	if (!is_update)
@@ -1357,7 +1363,7 @@ match_prosrc_to_literal(const char *prosrc, const char *literal,
 			if (cursorpos > 0)
 				newcp++;
 		}
-		chlen = pg_mblen(prosrc);
+		chlen = pg_mblen_cstr(prosrc);
 		if (strncmp(prosrc, literal, chlen) != 0)
 			goto fail;
 		prosrc += chlen;

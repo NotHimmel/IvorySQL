@@ -5,7 +5,7 @@
  *
  * Portions Copyright (c) 1996-2025, PostgreSQL Global Development Group
  * Portions Copyright (c) 1994, Regents of the University of California
- * Portions Copyright (c) 2023-2025, IvorySQL Global Development Team
+ * Portions Copyright (c) 2023-2026, IvorySQL Global Development Team
  *
  *
  * IDENTIFICATION
@@ -2058,7 +2058,7 @@ hash_record_extended(PG_FUNCTION_ARGS)
 			locfcinfo->args[0].value = values[i];
 			locfcinfo->args[0].isnull = false;
 			locfcinfo->args[1].value = Int64GetDatum(seed);
-			locfcinfo->args[0].isnull = false;
+			locfcinfo->args[1].isnull = false;
 			element_hash = DatumGetUInt64(FunctionCallInvoke(locfcinfo));
 
 			/* We don't expect hash support functions to return null */
