@@ -73,6 +73,7 @@ PG_FUNCTION_INFO_V1(ora_to_multi_byte);
 PG_FUNCTION_INFO_V1(ora_to_single_byte);
 PG_FUNCTION_INFO_V1(ora_like_escape_noescape);
 PG_FUNCTION_INFO_V1(ora_like_escape);
+PG_FUNCTION_INFO_V1(ora_listagg_check);
 
 #define PG_STR_GET_TEXT(str_) \
 	DatumGetTextP(DirectFunctionCall1(textin, CStringGetDatum(str_)))
@@ -2431,4 +2432,24 @@ ora_to_single_byte(PG_FUNCTION_ARGS)
 	SET_VARSIZE(dst, VARHDRSZ + dstlen);
 
 	PG_RETURN_TEXT_P(dst);
+}
+
+/*
+ * Enforce the 4000-byte limit on Oracle LISTAGG results.
+ */
+Datum
+ora_listagg_check(PG_FUNCTION_ARGS)
+{
+	text	   *value;
+	int			len;
+
+	if (PG_ARGISNULL(0))
+		PG_RETURN_NULL();
+
+	value = PG_GETARG_TEXT_PP(0);
+	len = VARSIZE_ANY_EXHDR(value);
+	if (len > 4000)
+		elog(ERROR, "result of aggregation exceeds 4000 bytes");
+
+	PG_RETURN_TEXT_P(value);
 }
