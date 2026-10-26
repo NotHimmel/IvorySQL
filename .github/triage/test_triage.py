@@ -339,7 +339,7 @@ class TriageTests(unittest.TestCase):
             process = subprocess.run([sys.executable, "-B", str(Path(triage.__file__)), "--fixture", str(fixture)],
                                      text=True, capture_output=True, env={"PATH": "/usr/bin:/bin",
                                      "GITHUB_EVENT_NAME": "workflow_dispatch", "TRIAGE_MODE": "preview",
-                                     "TRIAGE_APPLY": "true"})
+                                     "AUTO_APPLY": "true"})
         self.assertEqual(process.returncode, 0, process.stderr)
         self.assertEqual(json.loads(process.stdout)["mode"], "preview")
 

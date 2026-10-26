@@ -826,7 +826,7 @@ def main():
     if dispatch and mode not in ("preview", "apply", "sync-labels"):
         parser.error("Unknown workflow dispatch mode")
     apply = args.apply or mode in ("apply", "sync-labels") or (
-        not dispatch and os.environ.get("TRIAGE_APPLY", "").lower() == "true")
+        not dispatch and os.environ.get("AUTO_APPLY", "").lower() == "true")
     sync = args.sync_labels or mode == "sync-labels"
     if args.fixture and (apply or sync):
         parser.error("Offline fixtures are preview-only")

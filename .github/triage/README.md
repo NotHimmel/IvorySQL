@@ -107,7 +107,7 @@ branch. Both planning and execution always check out that branch.
    matrix task's Summary. Closed historical reports can be replayed offline.
 3. Select `apply` to update labels and the bot comment for the selected issues.
 4. After checking results, set the repository Actions variable
-   `ISSUE_TRIAGE_APPLY=true` to enable automatic writes. Otherwise event-triggered
+   `AUTO_APPLY=true` to enable automatic label and comment writes. Otherwise event-triggered
    runs are previews. Manual preview is always read-only.
 
 The workflow listens to issue creation, edits, reopening, and manual label changes,
