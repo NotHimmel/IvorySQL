@@ -1,0 +1,47 @@
+name: Issue triage report
+description: Report a bug, request a feature, or propose an enhancement
+body:
+  - type: dropdown
+    id: issue_type
+    attributes:
+      label: Issue type
+      description: Choose bug for incorrect behavior, feature for a new capability, or enhancement to improve existing behavior.
+      options: [bug, feature, enhancement]
+    validations:
+      required: true
+  - type: textarea
+    id: ai_model
+    attributes:
+      label: AI model
+      description: Specify models used to discover, investigate, or write this report. Separate up to five names/versions with commas or newlines. Write "not used" when applicable; a tool name alone is insufficient.
+      placeholder: org/model-a-v2, model-b-v1, or not used
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: Describe the problem or the use case and expected behavior for the requested change.
+    validations:
+      required: true
+  - type: input
+    id: database_version
+    attributes:
+      label: Database version
+      description: For bugs, provide the full database version or commit ID.
+      placeholder: PostgreSQL 18.1
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      placeholder: Operating system and architecture
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: For bugs, provide numbered steps or minimal SQL, plus expected and actual results.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Include relevant errors or stack traces, if available.

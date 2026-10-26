@@ -1,0 +1,25 @@
+{
+  "issue": {
+    "number": 100,
+    "title": "Bug: logical replication crashes during subscription refresh",
+    "body": "PostgreSQL 18.1 on Linux.\n\n1. Create a publication and subscription.\n2. Refresh the subscription while pgoutput is decoding.\n\nERROR: cache lookup failed for relation 12345\n\n### AI model\n\norg/model-a-v2",
+    "state": "open",
+    "labels": [],
+    "user": {"login": "reporter", "type": "User"}
+  },
+  "comments": [],
+  "history": [
+    {
+      "number": 80,
+      "title": "Logical replication crash on subscription refresh",
+      "body": "PostgreSQL 17.4. Refreshing a subscription during pgoutput decoding fails with ERROR: cache lookup failed for relation 67890",
+      "state": "closed"
+    },
+    {
+      "number": 90,
+      "title": "Enhancement: improve psql completion",
+      "body": "Add completion for more existing SQL commands.",
+      "state": "open"
+    }
+  ]
+}

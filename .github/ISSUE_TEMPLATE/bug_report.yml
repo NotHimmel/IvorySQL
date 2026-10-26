@@ -1,7 +1,16 @@
 name: Bug Report
 description: Report a bug encountered while using IvorySQL
-labels: ["bug", "needs-triage"]
+labels: ["bug", "type/bug", "needs-triage"]
 body:
+  - type: input
+    id: ai_model
+    attributes:
+      label: AI model
+      description: Specify the model name/version used for this report. Use commas for multiple models, or explicitly write "not used".
+      placeholder: Model name and version, or not used
+    validations:
+      required: true
+
   - type: textarea
     id: problem
     attributes:

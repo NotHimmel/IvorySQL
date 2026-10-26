@@ -1,0 +1,129 @@
+{
+  "sources": [
+    "https://www.postgresql.org/docs/current/overview.html",
+    "https://www.postgresql.org/docs/current/internals.html",
+    "https://www.postgresql.org/docs/current/admin.html",
+    "https://commitfest.postgresql.org/",
+    "https://www.kubernetes.dev/docs/guide/issue-triage/"
+  ],
+  "history_limit": 1000,
+  "max_batch_items": 50,
+  "similarity_threshold": 0.24,
+  "max_similar": 3,
+  "ai_threshold": 0.9,
+  "ai_base_url": "https://openrouter.ai/api/v1/chat/completions",
+  "ai_model": "openrouter/free",
+  "ai_model_options": {
+    "openrouter/free": {
+      "response_format": {"type": "json_object"}
+    }
+  },
+  "model_disclosure": {
+    "max_models": 5,
+    "color": "bfdadc",
+    "not_used_values": ["not used", "not-used", "no ai", "no ai used", "未使用", "未使用AI", "未使用 AI", "没有使用AI", "没有使用 AI"],
+    "incomplete_values": ["unknown", "unspecified", "n/a", "none", "tbd", "no response", "model", "AI model", "auto", "automatic", "default", "see above", "未填写", "未知", "不清楚", "待补充", "未提供", "自动", "默认", "ChatGPT", "Codex", "Cursor", "Copilot", "Claude Code"]
+  },
+  "labels": {
+    "type/bug": {
+      "color": "d73a4a", "description": "Incorrect behavior or a regression",
+      "patterns": ["\\bbug\\b", "\\bregression\\b", "\\b(segfault|segmentation fault|crash(?:es|ed)?)\\b", "\\b(wrong|incorrect) results?\\b", "崩溃|错误结果|结果错误|回归问题"]
+    },
+    "type/feature": {
+      "color": "a2eeef", "description": "A new capability",
+      "patterns": ["\\bfeature(?: request)?\\b", "新增(?:功能|能力|语法|支持)|新功能请求|功能请求"]
+    },
+    "type/enhancement": {
+      "color": "84b6eb", "description": "Improve an existing capability",
+      "patterns": ["\\benhancement\\b", "\\bimprove(?:ment|ments)?\\b", "\\boptimi[sz](?:e|ation)\\b", "优化(?!器)|改进|增强"]
+    },
+    "area/sql": {
+      "color": "c5def5", "description": "SQL commands, syntax and semantics",
+      "patterns": ["\\b(create|alter|drop) (table|index|view|function|type)\\b", "\\b(copy|merge|returning)\\b", "SQL 语法|SQL语法"]
+    },
+    "area/parser": {
+      "color": "c5def5", "description": "Parser, analysis and query rewriting",
+      "patterns": ["\\b(parser|parse analysis|rewriter|query rewrite|syntax error)\\b", "语法解析|语义分析|查询重写"]
+    },
+    "area/planner": {
+      "color": "c5def5", "description": "Planner, optimizer, estimates and plans",
+      "patterns": ["\\b(planner|optimizer|query plan|cost estimat|cardinality estimat)", "优化器|执行计划|代价估算|基数估算"]
+    },
+    "area/executor": {
+      "color": "c5def5", "description": "Query execution and parallel execution",
+      "patterns": ["\\b(executor|execprocnode|parallel query|parallel execution)\\b", "执行器|并行执行|并行查询"]
+    },
+    "area/transactions": {
+      "color": "c5def5", "description": "MVCC, snapshots, locking and transactions",
+      "patterns": ["\\b(mvcc|deadlock|snapshot|transaction|locking)\\b", "事务|死锁|快照"]
+    },
+    "area/storage": {
+      "color": "c5def5", "description": "Pages, buffers, TOAST and table storage",
+      "patterns": ["\\b(toast|shared buffers|buffer manager|page corruption|heap page|storage)\\b", "存储|缓冲区|页面损坏"]
+    },
+    "area/indexes": {
+      "color": "c5def5", "description": "Index access methods and behavior",
+      "patterns": ["\\b(b-?tree|brin|gist|spgist|sp-gist|gin|index(?:es)?|indexing)\\b", "索引"]
+    },
+    "area/wal-recovery": {
+      "color": "c5def5", "description": "WAL, checkpoints and crash recovery",
+      "patterns": ["\\b(wal|checkpoint|crash recovery|redo|xlog)\\b", "检查点|崩溃恢复|预写日志"]
+    },
+    "area/physical-replication": {
+      "color": "c5def5", "description": "Physical replication, standby and failover",
+      "patterns": ["\\b(physical replication|streaming replication|hot standby|failover|walsender|walreceiver)\\b", "物理复制|流复制|热备|故障切换"]
+    },
+    "area/logical-replication": {
+      "color": "c5def5", "description": "Logical decoding, publications and subscriptions",
+      "patterns": ["\\b(logical replication|logical decoding|pgoutput|publication|subscription)\\b", "逻辑复制|逻辑解码|发布订阅"]
+    },
+    "area/backup-restore": {
+      "color": "c5def5", "description": "Backup, restore, dump and point-in-time recovery",
+      "patterns": ["\\b(pg_dump|pg_restore|pg_basebackup|backup|restore|pitr)\\b", "备份|还原|时间点恢复"]
+    },
+    "area/vacuum": {
+      "color": "c5def5", "description": "VACUUM, autovacuum and freezing",
+      "patterns": ["\\b(vacuum|autovacuum|relfrozenxid|xid wraparound)\\b", "自动清理|事务冻结"]
+    },
+    "area/monitoring": {
+      "color": "c5def5", "description": "Statistics, logging and wait events",
+      "patterns": ["\\b(pg_stat_\\w+|pg_stat_statements|wait event|logging|monitoring)\\b", "监控|等待事件|日志输出"]
+    },
+    "area/security": {
+      "color": "c5def5", "description": "Authentication, roles, privileges and access control",
+      "patterns": ["\\b(authentication|authorization|privilege|permission denied|pg_hba|scram|oauth|security)\\b", "认证|鉴权|权限|访问控制"]
+    },
+    "area/procedural-languages": {
+      "color": "c5def5", "description": "PL/pgSQL and other procedural languages",
+      "patterns": ["\\b(plpgsql|pl/pgsql|plpython|pl/python|plperl|pl/perl)\\b", "过程语言|存储过程"]
+    },
+    "area/clients": {
+      "color": "c5def5", "description": "psql, libpq and the frontend/backend protocol",
+      "patterns": ["\\b(psql|libpq|wire protocol|frontend/backend protocol|pqexec|pqconnectdb)\\b", "客户端协议"]
+    },
+    "area/extensions": {
+      "color": "c5def5", "description": "Extensions, FDWs and contrib modules",
+      "patterns": ["\\b(extension|extensions|fdw|foreign data wrapper|contrib)\\b", "扩展机制|外部数据包装器"]
+    },
+    "area/build": {
+      "color": "c5def5", "description": "Build, installation and platform portability",
+      "patterns": ["\\b(meson|configure|compilation|compile|build failure|build error|linker)\\b", "编译|构建失败|安装失败|平台适配"]
+    },
+    "area/testing": {
+      "color": "c5def5", "description": "Regression tests, TAP and test infrastructure",
+      "patterns": ["\\b(pg_regress|regression test|tap test|test suite|flaky test)\\b", "回归测试|测试框架|测试用例"]
+    },
+    "area/documentation": {
+      "color": "c5def5", "description": "Documentation, examples and explanations",
+      "patterns": ["\\b(documentation|docs|typo|manual)\\b", "文档|手册|笔误"]
+    },
+    "ai-model/not-used": {"color": "bfdadc", "description": "Reporter explicitly states that no AI model was used"},
+    "needs-triage": {"color": "ededed", "description": "Awaiting maintainer triage"},
+    "triage/accepted": {"color": "0e8a16", "description": "Accepted for tracking by a maintainer"},
+    "triage/needs-information": {"color": "d876e3", "description": "Waiting for specific information from the reporter"},
+    "resolution/duplicate": {"color": "cfd3d7", "description": "Maintainer-confirmed duplicate; link the original issue"},
+    "resolution/invalid": {"color": "e4e669", "description": "Not an actionable issue, as determined by a maintainer"},
+    "resolution/wontfix": {"color": "ffffff", "description": "Maintainer decision not to implement or fix"},
+    "triage/skip": {"color": "ededed", "description": "Skip automated issue triage"}
+  }
+}

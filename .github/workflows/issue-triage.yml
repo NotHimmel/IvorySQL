@@ -1,0 +1,82 @@
+name: Issue triage
+
+on:
+  issues:
+    types: [opened, edited, reopened, labeled, unlabeled]
+  issue_comment:
+    types: [created, edited, deleted]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Preview, apply to issues, or create missing repository labels
+        type: choice
+        options: [preview, apply, sync-labels]
+        default: preview
+      numbers:
+        description: Issue numbers or ranges, e.g. 12,20-25,31 (PRs skipped; limit 50)
+        type: string
+      ai_model:
+        description: AI model ID (optional; variable or openrouter/free if blank)
+        type: string
+      ai_token:
+        description: Temporary token if Secret is absent (plain input, not a Secret; use a short-lived token)
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.sender.type != 'Bot' && !github.event.issue.pull_request &&
+       (github.event_name == 'issues' ||
+        github.event.comment.user.login == github.event.issue.user.login))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      targets: ${{ steps.targets.outputs.targets }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Resolve numbers and ranges
+        id: targets
+        env:
+          TRIAGE_MODE: ${{ inputs.mode }}
+        run: python3 .github/triage/triage.py --plan-only
+
+  triage:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        target: ${{ fromJSON(needs.plan.outputs.targets) }}
+    concurrency:
+      group: issue-triage-${{ github.repository }}-${{ matrix.target.number }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Analyze issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TRIAGE_MODE: ${{ inputs.mode }}
+          TRIAGE_TARGET_NUMBER: ${{ matrix.target.number }}
+          TRIAGE_TARGET_KIND: ${{ matrix.target.kind }}
+          TRIAGE_APPLY: ${{ vars.ISSUE_TRIAGE_APPLY }}
+          TRIAGE_AI_ENDPOINT: ${{ vars.TRIAGE_AI_ENDPOINT }}
+          TRIAGE_AI_MODEL: ${{ vars.TRIAGE_AI_MODEL }}
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+        # Temporary tokens are read from GITHUB_EVENT_PATH inside Python, never
+        # interpolated into a command or an env block printed by the runner.
+        run: python3 .github/triage/triage.py
