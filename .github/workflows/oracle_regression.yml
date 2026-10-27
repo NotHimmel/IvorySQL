@@ -1,6 +1,7 @@
 name: oracle_regression
 
 on:
+  workflow_dispatch:
   push:
     branches: [ master , IVORY_REL_5_STABLE, IVORY_REL_4_STABLE , IVORYSQL_REL_1_STABLE]
   pull_request:
@@ -13,43 +14,40 @@ jobs:
       matrix:
         os: [ubuntu-latest]
 
-    env:
-      LLVM_CONFIG: /usr/bin/llvm-config
-      CLANG: /usr/bin/clang
-      # Exercise the OAuth mock-server tests enabled by libcurl.
-      PG_TEST_EXTRA: oauth
-
     steps:
     - uses: actions/checkout@v4
     - name: dependancy
       if: ${{ matrix.os == 'ubuntu-latest' }}
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential git lcov bison flex \
-              libkrb5-dev libssl-dev libldap-dev libpam-dev python3-dev \
+        sudo apt-get install -y build-essential git lcov bison flex pkg-config \
+              libssl-dev libldap-dev libpam-dev python3-dev \
               tcl-dev libperl-dev gettext libxml2-dev libxslt-dev \
-              libreadline-dev libedit-dev uuid-dev libossp-uuid-dev \
+              libreadline-dev uuid-dev zlib1g-dev \
               libipc-run-perl libtime-hires-perl libtest-simple-perl \
-              libicu-dev libnuma-dev \
-              pkg-config llvm-dev clang liblz4-dev libzstd-dev lz4 zstd \
-              libsystemd-dev libselinux1-dev tzdata systemtap-sdt-dev \
-              libcurl4-openssl-dev liburing-dev
+              libicu-dev liblz4-dev libselinux1-dev
     - name: configure - linux
       if: ${{ matrix.os == 'ubuntu-latest' }}
       run: |
         ./configure \
-            --prefix=$PWD/inst \
-            --enable-cassert --enable-debug --enable-tap-tests --enable-rpath \
-            --with-tcl --with-python --with-gssapi --with-pam --with-ldap \
-            --with-openssl --with-libedit-preferred --with-uuid=e2fs \
-            --with-ossp-uuid  --with-libxml --with-libxslt  --with-perl \
-            --with-icu --with-libnuma --enable-injection-points \
-            --with-llvm --with-lz4 --with-zstd --with-systemd --with-selinux \
-            --with-system-tzdata=/usr/share/zoneinfo \
-            --enable-dtrace --with-libcurl --with-liburing \
-            --with-extra-version="-ci"
+            --prefix="$PWD/inst" 'CFLAGS=-O2 -g' \
+            --enable-nls \
+            --enable-tap-tests \
+            --with-tcl \
+            --with-perl \
+            --with-python \
+            --with-pam \
+            --with-ldap \
+            --with-selinux \
+            --with-readline \
+            --with-openssl \
+            --with-libxml \
+            --with-libxslt \
+            --with-uuid=e2fs \
+            --with-lz4 \
+            --with-icu
     - name: compile
-      run: make && make install
+      run: make -j2 && make install
 
     - name: report build configuration
       run: |
@@ -62,7 +60,7 @@ jobs:
     - name: collect files
       if: failure()
       run: |
-          find . \( -name "*.diffs" -or -name "oracle_regression.out" -or -path \*/tmp_check/log -or -path \*src/test/regress/log \) -print0 |
+          find . \( -name "config.log" -or -name "*.diffs" -or -name "regression.out" -or -name "oracle_regression.out" -or -path '*/tmp_check/log' -or -path '*/regress/log' \) -print0 |
                 xargs -0 tar -czf oracle_regression.tar.gz
     - name: upload oracle_regression files
       if: failure()
