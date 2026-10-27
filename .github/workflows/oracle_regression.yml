@@ -7,28 +7,41 @@ on:
   pull_request:
     branches: [ master , IVORY_REL_5_STABLE, IVORY_REL_4_STABLE , IVORYSQL_REL_1_STABLE]
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   oracle_regression:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest]
+    name: oracle-check (Rocky Linux 10)
+    runs-on: ubuntu-latest
+    container:
+      image: rockylinux/rockylinux:10
+      options: --shm-size=1g
 
     steps:
+    - name: install Rocky Linux 10 build dependencies
+      run: |
+        cat /etc/os-release
+        dnf -y --enablerepo=crb install \
+            gcc gcc-c++ make git bison flex pkgconf-pkg-config \
+            gettext gettext-devel tcl-devel \
+            perl perl-devel perl-ExtUtils-Embed perl-IPC-Run \
+            perl-Time-HiRes perl-Test-Simple python3-devel \
+            pam-devel openldap-devel libselinux-devel readline-devel \
+            openssl-devel libxml2-devel libxslt-devel libuuid-devel \
+            lz4-devel libicu-devel zlib-devel glibc-langpack-en \
+            tar gzip findutils diffutils which procps-ng hostname \
+            shadow-utils util-linux
+        useradd --create-home highgo
     - uses: actions/checkout@v4
-    - name: dependancy
-      if: ${{ matrix.os == 'ubuntu-latest' }}
+    - name: prepare non-root build directory
       run: |
-        sudo apt-get update
-        sudo apt-get install -y build-essential git lcov bison flex pkg-config \
-              libssl-dev libldap-dev libpam-dev python3-dev \
-              tcl-dev libperl-dev gettext libxml2-dev libxslt-dev \
-              libreadline-dev uuid-dev zlib1g-dev \
-              libipc-run-perl libtime-hires-perl libtest-simple-perl \
-              libicu-dev liblz4-dev libselinux1-dev
-    - name: configure - linux
-      if: ${{ matrix.os == 'ubuntu-latest' }}
+        chown -R highgo:highgo "$GITHUB_WORKSPACE"
+    - name: configure
       run: |
+        runuser -u highgo -- bash -e <<'BUILD'
+        cd "$GITHUB_WORKSPACE"
         ./configure \
             --prefix="$PWD/inst" 'CFLAGS=-O2 -g' \
             --enable-nls \
@@ -46,16 +59,28 @@ jobs:
             --with-uuid=e2fs \
             --with-lz4 \
             --with-icu
+        BUILD
     - name: compile
-      run: make -j2 && make install
+      run: |
+        runuser -u highgo -- bash -e <<'BUILD'
+        cd "$GITHUB_WORKSPACE"
+        make -j2
+        make install
+        BUILD
 
     - name: report build configuration
       run: |
+        cat /etc/os-release
+        gcc --version
         ./src/bin/pg_config/pg_config --version
         ./src/bin/pg_config/pg_config --configure
 
     - name: oracle-check
-      run: make oracle-check
+      run: |
+        runuser -u highgo -- bash -e <<'TEST'
+        cd "$GITHUB_WORKSPACE"
+        make oracle-check
+        TEST
 
     - name: collect files
       if: failure()
@@ -70,32 +95,57 @@ jobs:
         path: ${{ github.workspace }}/oracle_regression.tar.gz
 
   compression_without_lz4:
-    name: compression without LZ4
+    name: compression without LZ4 (Rocky Linux 10)
     runs-on: ubuntu-latest
+    container:
+      image: rockylinux/rockylinux:10
+      options: --shm-size=1g
     timeout-minutes: 30
 
     steps:
-    - uses: actions/checkout@v4
-    - name: install build dependencies
+    - name: install Rocky Linux 10 build dependencies
       run: |
-        sudo apt-get update
-        sudo apt-get install -y build-essential bison flex pkg-config \
-            libicu-dev libreadline-dev zlib1g-dev uuid-dev
+        cat /etc/os-release
+        dnf -y --enablerepo=crb install \
+            gcc gcc-c++ make git bison flex pkgconf-pkg-config \
+            perl perl-IPC-Run perl-Time-HiRes perl-Test-Simple \
+            libicu-devel readline-devel zlib-devel libuuid-devel \
+            libxml2-devel glibc-langpack-en \
+            tar gzip findutils diffutils which procps-ng hostname \
+            shadow-utils util-linux
+        useradd --create-home highgo
+    - uses: actions/checkout@v4
+    - name: prepare non-root build directory
+      run: |
+        chown -R highgo:highgo "$GITHUB_WORKSPACE"
     - name: configure without LZ4
       run: |
+        runuser -u highgo -- bash -e <<'BUILD'
+        cd "$GITHUB_WORKSPACE"
         ./configure \
             --prefix="$PWD/inst" \
             --enable-cassert --enable-debug --with-uuid=e2fs --without-lz4 \
             --with-extra-version="-ci"
+        BUILD
     - name: compile
-      run: make -j2
+      run: |
+        runuser -u highgo -- bash -e <<'BUILD'
+        cd "$GITHUB_WORKSPACE"
+        make -j2
+        BUILD
     - name: report build configuration
       run: |
+        cat /etc/os-release
+        gcc --version
         ./src/bin/pg_config/pg_config --version
         ./src/bin/pg_config/pg_config --configure
     - name: compression regression without LZ4
       # compression uses the fipshash helpers created by test_setup.
-      run: make oracle-check-tests TESTS='test_setup compression'
+      run: |
+        runuser -u highgo -- bash -e <<'TEST'
+        cd "$GITHUB_WORKSPACE"
+        make oracle-check-tests TESTS='test_setup compression'
+        TEST
     - name: upload compression failure files
       if: failure()
       uses: actions/upload-artifact@v4
