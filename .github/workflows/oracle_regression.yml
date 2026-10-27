@@ -11,6 +11,11 @@ defaults:
   run:
     shell: bash
 
+env:
+  # initdb derives the default database encoding from the container locale.
+  LANG: C.UTF-8
+  LC_ALL: C.UTF-8
+
 jobs:
   oracle_regression:
     name: oracle-check (Rocky Linux 10)
@@ -71,6 +76,7 @@ jobs:
     - name: report build configuration
       run: |
         cat /etc/os-release
+        locale
         gcc --version
         ./src/bin/pg_config/pg_config --version
         ./src/bin/pg_config/pg_config --configure
@@ -136,6 +142,7 @@ jobs:
     - name: report build configuration
       run: |
         cat /etc/os-release
+        locale
         gcc --version
         ./src/bin/pg_config/pg_config --version
         ./src/bin/pg_config/pg_config --configure
