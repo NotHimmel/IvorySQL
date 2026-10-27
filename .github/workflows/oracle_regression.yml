@@ -54,8 +54,8 @@ jobs:
         ./src/bin/pg_config/pg_config --version
         ./src/bin/pg_config/pg_config --configure
 
-    - name: oracle_regression
-      run: make oracle-check-world
+    - name: oracle-check
+      run: make oracle-check
 
     - name: collect files
       if: failure()
