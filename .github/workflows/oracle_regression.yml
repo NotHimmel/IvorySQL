@@ -18,14 +18,14 @@ env:
 
 jobs:
   oracle_regression:
-    name: oracle-check (Rocky Linux 10)
+    name: oracle-check (CentOS Stream 9)
     runs-on: ubuntu-latest
     container:
-      image: rockylinux/rockylinux:10
+      image: quay.io/centos/centos:stream9
       options: --shm-size=1g
 
     steps:
-    - name: install Rocky Linux 10 build dependencies
+    - name: install CentOS Stream 9 build dependencies
       run: |
         cat /etc/os-release
         dnf -y --enablerepo=crb install \
@@ -101,15 +101,15 @@ jobs:
         path: ${{ github.workspace }}/oracle_regression.tar.gz
 
   compression_without_lz4:
-    name: compression without LZ4 (Rocky Linux 10)
+    name: compression without LZ4 (CentOS Stream 9)
     runs-on: ubuntu-latest
     container:
-      image: rockylinux/rockylinux:10
+      image: quay.io/centos/centos:stream9
       options: --shm-size=1g
     timeout-minutes: 30
 
     steps:
-    - name: install Rocky Linux 10 build dependencies
+    - name: install CentOS Stream 9 build dependencies
       run: |
         cat /etc/os-release
         dnf -y --enablerepo=crb install \
