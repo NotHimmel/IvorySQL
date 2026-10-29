@@ -21,11 +21,16 @@ Check result: $information_status
 | Platform | $platforms |
 | Reporter's declared AI model | $reported_models |
 | Reproduction clues | $reproduction |
+| Expected behavior | $expected_behavior |
+| Compatible mode | $compatible_mode |
+| Server encoding | $server_encoding |
 | Key errors | $errors |
 
 Information to provide or verify:
 
 $missing
+
+$submission_guidance
 
 ### 3. Similar issues
 

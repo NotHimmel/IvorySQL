@@ -26,15 +26,20 @@ Check result: Required-field checks passed; maintainer review is still needed
 | Platform | linux |
 | Reporter's declared AI model | org/model-a-v2 |
 | Reproduction clues | Reproduction instructions or code found; reproduction still needs verification |
+| Expected behavior | Subscription refresh completes without a crash. |
+| Compatible mode | pg |
+| Server encoding | UTF8 |
 | Key errors | ERROR: cache lookup failed for relation 12345 |
 
 Information to provide or verify:
 
 - No missing required information identified.
 
+**Submission check passed.** Thank you for providing the required information. A maintainer still needs to review the report.
+
 ### 3. Similar issues
 
-- [#80](https://github.com/fixture/repository/issues/80) Logical replication crash on subscription refresh (closed; related issue; text similarity 0.681)
+- [#80](https://github.com/fixture/repository/issues/80) Logical replication crash on subscription refresh (closed; related issue; text similarity 0.674)
   Shared terms: subscription, refresh, during, logical, replication
 
 ### 4. Label changes

@@ -2,7 +2,7 @@
   "issue": {
     "number": 100,
     "title": "Bug: logical replication crashes during subscription refresh",
-    "body": "PostgreSQL 18.1 on Linux.\n\n1. Create a publication and subscription.\n2. Refresh the subscription while pgoutput is decoding.\n\nERROR: cache lookup failed for relation 12345\n\n### AI model\n\norg/model-a-v2",
+    "body": "PostgreSQL 18.1 on Linux.\n\n1. Create a publication and subscription.\n2. Refresh the subscription while pgoutput is decoding.\n\nERROR: cache lookup failed for relation 12345\n\nExpected behavior: Subscription refresh completes without a crash.\nCompatible mode: pg\nServer encoding: UTF8\n\n### AI model\n\norg/model-a-v2",
     "state": "open",
     "labels": [],
     "user": {"login": "reporter", "type": "User"}

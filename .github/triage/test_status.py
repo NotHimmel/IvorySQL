@@ -53,13 +53,15 @@ class StatusTests(unittest.TestCase):
         triage.analyze(github, 20, self.config, apply=True)
         self.assertNotIn("needs-triage", github.current["labels"])
         self.assertIn("triage/needs-information", github.current["labels"])
-        github.current["body"] = "IvorySQL master\n1. Start the server.\nAI model: not used"
+        github.current["body"] = ("IvorySQL master\n1. Start the server.\nAI model: not used\n"
+                                  "Expected behavior: The server starts successfully.\nCompatible mode: pg\nServer encoding: UTF8")
         triage.analyze(github, 20, self.config, apply=True)
         self.assertNotIn("triage/needs-information", github.current["labels"])
         self.assertIn("triage/accepted", github.current["labels"])
 
     def test_manual_information_request_is_preserved_after_acceptance(self):
-        github = FakeGitHub(issue(body="IvorySQL master\n1. Start the server.\nAI model: not used",
+        github = FakeGitHub(issue(body="IvorySQL master\n1. Start the server.\nAI model: not used\n"
+                                       "Expected behavior: The server starts successfully.\nCompatible mode: pg\nServer encoding: UTF8",
                                   labels=["needs-triage", "triage/accepted", "triage/needs-information"]))
         result = triage.analyze(github, 20, self.config, apply=True)
         self.assertEqual(result["details"]["missing"], [])

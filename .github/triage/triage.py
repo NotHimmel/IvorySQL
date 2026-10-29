@@ -30,6 +30,16 @@ STOP = set("a an the and or of to in for with is are was were be been this that 
            "postgresql postgres database version expected actual behavior "
            "steps reproduce reproduction description information environment "
            "please thanks using use sql select error test no response ai model models used".split())
+SUBMISSION_FIELDS = {
+    "Issue type": ("Issue type", "Choose bug, feature, or enhancement."),
+    "Issue description": ("Description", "Describe the problem or requested change and include actual output when relevant."),
+    "Database version": ("Database version", "Provide SELECT version() output, a release, master/main, or a commit ID."),
+    "Reproduction steps or minimal SQL": ("Reproduction steps", "Provide reproducible instructions, commands, or minimal SQL."),
+    "Expected behavior": ("Expected behavior", "Explain what should happen; include expected output when available."),
+    "Compatible mode": ("Compatible mode", "Provide SHOW ivorysql.compatible_mode output: oracle, pg, or both; otherwise explain why it is not applicable."),
+    "Server encoding": ("Server encoding", "Provide SHOW server_encoding output; otherwise explain why it is not applicable."),
+    "AI model": ("AI model", "Give the model name/version, or explicitly state not used; a tool name alone is insufficient."),
+}
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -316,7 +326,7 @@ def extract_reported_models(text, config):
         return [], [missing + "; the declaration contains both model names and a no-AI statement"]
     models = {}
     for name in names:
-        if len(name) > 120 or name.casefold() in incomplete:
+        if len(name) > 120 or name.casefold() in incomplete or not meaningful_value(name):
             return [], [missing]
         try:
             label = model_label(name)
@@ -358,6 +368,15 @@ def reporter_text(issue, comments):
     # Include the latest responses without letting an initial long log hide them.
     return ((issue.get("body") or "")[:16000] + "\n" +
             "\n".join(followups[-5:])[-8000:]).strip()
+
+
+def submission_sources(issue, comments):
+    """Keep author supplements separate so a previous form section cannot swallow them."""
+    author = issue.get("user", {}).get("login")
+    followups = [c for c in comments if author and c.get("user", {}).get("login") == author
+                 and c.get("user", {}).get("type") != "Bot"]
+    followups.sort(key=lambda c: c.get("updated_at") or c.get("created_at") or "")
+    return [issue.get("body") or ""] + [c.get("body") or "" for c in followups]
 
 
 def classify(issue, text, config):
@@ -448,10 +467,12 @@ def rank_similar(issue, text, history, config, include_weak=False):
 
 def meaningful_value(value):
     """Ignore empty form answers and common unfilled reproduction placeholders."""
-    value = re.sub(r"<!--.*?-->", "", value, flags=re.S).strip("`*_ \t\r\n")
-    return bool(value and value.casefold() not in {
+    value = re.sub(r"<!--.*?-->", "", value, flags=re.S)
+    value = re.sub(r"(?m)^[ \t]*(?:`{3,}|~{3,})[^\n]*$", "", value).strip("`*_ \t\r\n")
+    return bool(value and not re.fullmatch(r"<[^<>]*>|\[[^\[\]]*\]", value) and value.casefold() not in {
         "no response", "n/a", "none", "unknown", "tbd", "todo", "not provided",
         "paste output here", "paste commands here", "未填写", "待补充", "暂无",
+        "describe the feature you'd like to propose:",
     })
 
 
@@ -547,6 +568,103 @@ def extract_details(issue, text, suggestions, config=None, model_text=None):
             "platforms": list(dict.fromkeys(p.casefold() for p in platforms))[:5],
             "has_reproduction_clues": has_reproduction,
             "errors": errors[:3], "reported_models": models, "missing": missing}
+
+
+def submission_answer(sources, field):
+    """Read the latest explicit answer, including code-only output in a form section."""
+    for source in reversed(sources):
+        source = re.sub(r"<!--.*?-->", "", source, flags=re.S)
+        sections = [content for heading, content in report_sections(source)
+                    if re.fullmatch(field, heading, re.I)]
+        if sections:
+            lines, fence = [], None
+            for line in sections[-1].splitlines():
+                marker = re.match(r"^[ \t]*(`{3,}|~{3,})", line)
+                if marker:
+                    if fence is None:
+                        fence = marker[1]
+                    elif marker[1][0] == fence[0] and len(marker[1]) >= len(fence):
+                        fence = None
+                # An inline follow-up field must not fill a preceding empty field.
+                if fence is None and not marker and re.match(
+                        r"^[ \t]*(?:Issue type|Description|Database version|Reproduction steps|"
+                        r"Expected behavior|Compatible mode|Server encoding|AI models?)[ \t]*[:：]", line, re.I):
+                    break
+                lines.append(line)
+            return "\n".join(lines).strip()
+        values = declared_fields(source, field)
+        if values:
+            return values[-1]
+    return ""
+
+
+def check_submission(issue, comments, suggestions, config):
+    sources = submission_sources(issue, comments)
+    # Completeness checks use all author supplements, independently of the shorter
+    # text sent to the external model. A boundary resets form-section context.
+    text = "\n\n# Reporter follow-up\n\n".join(sources)
+    details = extract_details(issue, text, suggestions, config, reporter_model_text(issue, comments))
+    missing = details["missing"]
+    types = {s["label"] for s in suggestions if s["label"].startswith("type/")}
+    if len(types) != 1:
+        missing.insert(0, "Issue type")
+    expected = submission_answer(sources,
+        r"Expected(?:[ \t]+(?:behaviou?r|results?|output))?|What did you expect to happen\?|预期(?:行为|结果)")
+    mode = submission_answer(sources, r"Compatible[ \t]+mode|Compatibility[ \t]+mode|兼容模式")
+    encoding = submission_answer(sources, r"Server[ \t]+encoding|Database[ \t]+encoding|服务端编码|服务器编码")
+    if "type/bug" in types:
+        if not meaningful_value(expected):
+            missing.append("Expected behavior")
+        # Build failures do not have a running server whose settings can be read.
+        areas = {s["label"] for s in suggestions if s["label"].startswith("area/")}
+        build_only = "area/build" in areas and areas <= {"area/build", "area/testing"}
+        if not build_only:
+            def not_applicable(value):
+                return bool(re.match(r"(?:not applicable|n/a)\s*[:(\-]\s*\S.{3,}", value, re.I))
+
+            if not (meaningful_value(mode) and (re.search(r"\b(?:oracle|pg|both|postgresql)\b", mode, re.I)
+                                               or not_applicable(mode))):
+                missing.append("Compatible mode")
+            if not (meaningful_value(encoding) and (not_applicable(encoding) or (
+                    re.search(r"\b(?:UTF-?8|SQL_ASCII|LATIN\d+|WIN\d+|EUC_\w+|SJIS|BIG5|GB\w+|KOI8\w*|"
+                              r"MULE_INTERNAL|ISO_8859_\d+|UHC|JOHAB|SHIFT_JIS_2004)\b", encoding, re.I)))):
+                missing.append("Server encoding")
+    description_field = r"Description|What happened\?|Issue description|Feature Request|Enhancement|问题描述"
+    description = submission_answer(sources, description_field)
+    has_description_field = any(declared_fields(source, description_field) for source in sources)
+    if has_description_field and meaningful_value(description):
+        missing = [name for name in missing if name != "Issue description"]
+    elif has_description_field:
+        missing.append("Issue description")
+    elif not any(meaningful_value(re.sub(
+            r"(?im)^[^\n:：]{1,40}[:：][^\n]*", "", content))
+            for heading, content in report_sections(without_model_metadata(text))
+            if not heading or heading == "Reporter follow-up"):
+        missing.append("Issue description")
+    details["expected_behavior"] = expected
+    details["compatible_mode"] = mode
+    details["server_encoding"] = encoding
+    details["missing"] = list(dict.fromkeys(missing))
+    return details
+
+
+def submission_field(name):
+    return SUBMISSION_FIELDS["AI model" if name.startswith("AI model") else name]
+
+
+def submission_guidance(repository, missing):
+    if not missing:
+        return ("**Submission check passed.** Thank you for providing the required information. "
+                "A maintainer still needs to review the report.")
+    fields = list(dict.fromkeys(submission_field(name)[0] for name in missing))
+    return ("**Action required from the issue author.** Please edit this issue or add an author comment "
+            "with the missing information listed above. Use the "
+            f"[issue templates](https://github.com/{repository}/issues/new/choose) as a reference; "
+            "keep the information in this issue.\n\n"
+            "Copy the missing fields below and replace every TODO with your answer:\n\n```text\n" +
+            "\n".join(field + ": TODO" for field in fields) + "\n```\n\n"
+            "After an author edit or comment, an apply run updates this same bot comment and clears "
+            "the bot's information-request label once the required information is present.")
 
 
 def search_queries(repository, issue, text):
@@ -759,8 +877,13 @@ def render_comment(repository, suggestions, similar, plan, details, ai_status, n
         "platforms": safe_text(", ".join(details["platforms"]) or "Not identified"),
         "reported_models": safe_text(", ".join(m["name"] for m in details["reported_models"]) or "Missing or incomplete declaration"),
         "reproduction": "Reproduction instructions or code found; reproduction still needs verification" if details["has_reproduction_clues"] else "Not identified",
+        "expected_behavior": safe_text(details.get("expected_behavior") or "Not identified"),
+        "compatible_mode": safe_text(details.get("compatible_mode") or "Not identified"),
+        "server_encoding": safe_text(details.get("server_encoding") or "Not identified"),
         "errors": safe_text("; ".join(details["errors"]) or "Not identified"),
-        "missing": "\n".join("- [ ] " + safe_text(m) for m in details["missing"]) or "- No missing required information identified.",
+        "missing": "\n".join("- [ ] " + safe_text(m) + ": " + submission_field(m)[1]
+                             for m in details["missing"]) or "- No missing required information identified.",
+        "submission_guidance": submission_guidance(repository, details["missing"]),
         "similar": "\n".join(similar_lines),
         "add_labels": show_labels(plan["add"]),
         "remove_labels": show_labels(plan["remove"]),
@@ -794,7 +917,9 @@ def analyze(github, number, config, apply=False, ai_env=None, target_kind="issue
     old_comment = bot_comment(comments)
     previous = recover_state(read_state(old_comment), label_names(issue))
     text = reporter_text(issue, comments)
-    suggestions = classify(issue, text, config)
+    declared_type = submission_answer(submission_sources(issue, comments), r"Issue[ \t]+type|问题类型")
+    classification_text = text + "\n\nIssue type: " + declared_type if declared_type else text
+    suggestions = classify(issue, classification_text, config)
     history, capped = github.history(config["history_limit"])
     notes = []
     if capped:
@@ -840,7 +965,7 @@ def analyze(github, number, config, apply=False, ai_env=None, target_kind="issue
     if manual_types:
         detail_suggestions = [s for s in suggestions if not s["label"].startswith("type/")]
         detail_suggestions += [{"label": n} for n in manual_types]
-    details = extract_details(issue, text, detail_suggestions, config, reporter_model_text(issue, comments))
+    details = check_submission(issue, comments, detail_suggestions, config)
     suggestions.extend({"label": model["label"], "evidence": model["evidence"], "source": "reporter"}
                        for model in details["reported_models"])
     plan = label_plan(issue, suggestions, previous, details["missing"])

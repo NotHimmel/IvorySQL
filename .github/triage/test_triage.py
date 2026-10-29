@@ -264,7 +264,8 @@ class TriageTests(unittest.TestCase):
         github = FakeGitHub(current=issue(body="It crashes"))
         triage.analyze(github, 20, self.config, apply=True)
         self.assertIn("triage/needs-information", github.current["labels"])
-        github.thread.append({"id": 101, "body": "PostgreSQL 18.1\n1. Start replication\n2. Refresh subscription\nAI model: test-model-v1",
+        github.thread.append({"id": 101, "body": "PostgreSQL 18.1\n1. Start replication\n2. Refresh subscription\nAI model: test-model-v1\n"
+                                                "Expected behavior: Replication continues without a crash.\nCompatible mode: pg\nServer encoding: UTF8",
                               "user": {"login": "reporter", "type": "User"}})
         triage.analyze(github, 20, self.config, apply=True)
         self.assertNotIn("triage/needs-information", github.current["labels"])

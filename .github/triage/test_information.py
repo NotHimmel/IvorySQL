@@ -62,6 +62,10 @@ meson compile -C build
 ### IvorySQL version
 
 master
+
+### What did you expect to happen?
+
+The build should finish successfully.
 """
         current = issue(title="Bug: build fails", body=body, labels=["type/bug", "needs-triage"])
         result = triage.analyze(FakeGitHub(current), 20, self.config)

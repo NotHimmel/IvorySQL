@@ -41,6 +41,21 @@ body:
       label: Reproduction steps
       description: For bugs, provide numbered steps or minimal SQL, plus expected and actual results.
   - type: textarea
+    id: expected_behavior
+    attributes:
+      label: Expected behavior
+      description: For bugs, describe what should happen and include expected output when available.
+  - type: input
+    id: compatible_mode
+    attributes:
+      label: Compatible mode
+      description: For database behavior bugs, provide SHOW ivorysql.compatible_mode output (oracle, pg, or both), or write "not applicable" with a reason. Not required for build-only problems.
+  - type: input
+    id: server_encoding
+    attributes:
+      label: Server encoding
+      description: For database behavior bugs, provide SHOW server_encoding output, or write "not applicable" with a reason. Not required for build-only problems.
+  - type: textarea
     id: logs
     attributes:
       label: Logs

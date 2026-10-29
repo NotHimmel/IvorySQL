@@ -24,8 +24,8 @@ thresholds, and limits:
   label removes it. Removing acceptance and resolution restores it for open
   issues on the next run. Automated classification does not imply acceptance.
 - Information: `triage/needs-information` can coexist with acceptance. Missing model
-  declarations, empty descriptions, and bug reports without an identified version or
-  reproduction clues produce a specific checklist. Releases, `master`/`main`,
+  declarations, unknown issue types, empty descriptions, and incomplete bug reports
+  produce a specific checklist. Releases, `master`/`main`,
   PostgreSQL stable branches, and explicit commit IDs count as version information.
   Reproduction fields can contain prose; SQL, shell commands, and numbered steps
   are also accepted clues. Environment scaffolding and log sections are excluded.
@@ -46,6 +46,53 @@ state. Missing, malformed, or copied user-authored state cannot claim ownership.
 
 Adding or removing labels does not trigger a run. Use a manual `apply` run to
 reconcile stage labels immediately, or wait for the next supported event.
+
+## Guiding incomplete submissions
+
+The bot checks required information rather than requiring an exact Markdown layout.
+GitHub does not expose which template was selected, so it reports specific missing
+information instead of claiming that an author did not use a template. CLI/API
+submissions and free-form reports receive the same checks.
+
+| Report type | Required information |
+| --- | --- |
+| All reports | A recognizable issue type, a description, and the reporter's AI model declaration |
+| Bugs | Database version or revision, reproduction instructions, and expected behavior |
+| Database behavior bugs | Compatible mode and server encoding, or an explicit not-applicable explanation |
+
+The type can come from the form, a manual type label, or classification. Build-only
+reports do not need running-server settings. Feature and enhancement requests do
+not need bug-only fields. The generic form includes the conditional bug fields;
+the existing bug form headings are also recognized. Placeholders such as TODO,
+_No response_, bare Other, and tool-only model names do not satisfy the checks.
+
+In `apply` mode, an incomplete report receives `triage/needs-information` and the
+same fixed bot comment includes an action request, field-specific instructions,
+a template link, and a copyable reply containing only the missing fields. Authors
+can edit the issue or supplement it in an author comment. For example:
+
+```text
+Description: Refreshing a subscription crashes the server.
+Database version: master
+Reproduction steps: Create a subscription and refresh it while decoding changes.
+Expected behavior: Subscription refresh completes without crashing.
+Compatible mode: pg
+Server encoding: UTF8
+AI model: not used
+```
+
+The next apply run shrinks the checklist or replaces it with a passed check, and
+clears the bot-owned information-request label when all required information is
+present. Manual information-request labels remain for maintainers. Edited or
+deleted supplements are reevaluated; supplements are not lost after five later
+comments. Comments from other users or bots do not satisfy reporter requirements.
+The most recently updated author comment with an explicit answer takes precedence
+over older answers for expected behavior and runtime settings.
+
+These checks run locally without relying on the model's opinion. They do not
+verify reproduction, accept the issue, or close it. Repeated runs reuse one bot
+comment. Automatic reminders require `AUTO_APPLY=true`; otherwise events produce
+previews and a manual `apply` run is needed to publish the guidance.
 
 ## Declaring the report's AI model
 
@@ -97,8 +144,8 @@ fields have been supplied; manual information requests remain for maintainers.
 [comment.md](comment.md) fixes the order and layout, including empty fields:
 
 1. Classification and labels: proposed result, manual labels, suggestions, evidence.
-2. Information completeness: version, platform, model, reproduction clues, errors,
-   and a checklist of missing information.
+2. Information completeness: version, platform, model, reproduction clues, expected
+   behavior, runtime settings, errors, and an actionable checklist with a reply template.
 3. Similar issues: links, relationships, scores, and reasons, or a fixed empty state.
 4. Label changes: planned additions and removal of bot-managed labels.
 5. Triage notes: analysis method, configured model, search limits, maintainer actions.
@@ -263,7 +310,7 @@ failures, and return a nonzero status if any item failed. Result JSON and option
 
 The checks workflow runs offline tests when automation or issue templates change.
 It does not read model credentials. Tests cover bilingual classification, model
-declarations, form-version and reproduction extraction, stage transitions, manual
+declarations, submission guidance and author supplements, form-version and reproduction extraction, stage transitions, manual
 overrides, stable comments, range parsing, interrupted writeback before and after
 server mutations, PR skipping, stale analysis, credential masking, and provider fallback.
 
