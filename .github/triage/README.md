@@ -27,7 +27,9 @@ thresholds, and limits:
   not proof that reproduction succeeds.
 - Resolutions: `resolution/duplicate`, `resolution/invalid`, `resolution/wontfix` are
   maintainer decisions. Confirmed duplicates should link to their original issue.
-- `triage/skip` opts an issue out of automated handling.
+- `triage/skip` is manually applied by maintainers to exclude an issue from all
+  triage runs, including manual runs. The bot never adds this label. Removing it
+  allows processing on the next supported event or manual run.
 
 Manual labels take precedence. The bot removes only labels it added and recorded in
 its comment. A manually set information-request label is also retained. Removing a
@@ -110,8 +112,9 @@ branch. Both planning and execution always check out that branch.
    `AUTO_APPLY=true` to enable automatic label and comment writes. Otherwise event-triggered
    runs are previews. Manual preview is always read-only.
 
-The workflow listens to issue creation, edits, reopening, and manual label changes,
-plus creation, editing, or deletion of reporter comments. Bot events are ignored.
+The workflow listens to issue creation, edits, and reopening, plus creation,
+editing, or deletion of reporter comments. Adding or removing labels does not
+trigger analysis. Bot events are ignored.
 Closed, unavailable, opted-out, and PR entries are skipped with an explanation.
 
 `numbers` supports individual IDs, inclusive ascending ranges, mixed lists,
