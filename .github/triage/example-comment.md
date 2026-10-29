@@ -25,7 +25,7 @@ Check result: Required-field checks passed; maintainer review is still needed
 | Database version | 18.1 |
 | Platform | linux |
 | Reporter's declared AI model | org/model-a-v2 |
-| Reproduction clues | SQL or numbered steps found; reproduction still needs verification |
+| Reproduction clues | Reproduction instructions or code found; reproduction still needs verification |
 | Key errors | ERROR: cache lookup failed for relation 12345 |
 
 Information to provide or verify:

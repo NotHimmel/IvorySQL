@@ -58,8 +58,10 @@ class FakeGitHub:
             comment_id = int(path.rsplit("/", 1)[1])
             next(c for c in self.thread if c["id"] == comment_id)["body"] = data["body"]
         elif path.endswith("/comments"):
-            self.thread.append({"id": 100, "body": data["body"],
-                                "user": {"login": triage.BOT, "type": "Bot"}})
+            comment = {"id": 100, "body": data["body"],
+                       "user": {"login": triage.BOT, "type": "Bot"}}
+            self.thread.append(comment)
+            return copy.deepcopy(comment)
         return {}
 
 

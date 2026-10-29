@@ -446,34 +446,106 @@ def rank_similar(issue, text, history, config, include_weak=False):
     return result[:max(10, config["max_similar"])]
 
 
+def meaningful_value(value):
+    """Ignore empty form answers and common unfilled reproduction placeholders."""
+    value = re.sub(r"<!--.*?-->", "", value, flags=re.S).strip("`*_ \t\r\n")
+    return bool(value and value.casefold() not in {
+        "no response", "n/a", "none", "unknown", "tbd", "todo", "not provided",
+        "paste output here", "paste commands here", "未填写", "待补充", "暂无",
+    })
+
+
+def database_versions(source):
+    """Recognize release numbers, development branches, and explicit commit IDs."""
+    release = r"\d{1,2}(?:\.\d{1,3}){0,2}(?:\s*(?:beta|rc)\s*\d+)?"
+    revision = r"(?:master|main|[a-f0-9]{7,40}|REL_\d[\w.-]*_STABLE)"
+    value = r"(?<![\w.])(?:" + revision + r"|v?(?:" + release + r"))(?![\w.])"
+    fields = declared_fields(source,
+        r"(?:(?:database|ivorysql|postgresql|postgres|hpedb)[ \t]+)?version|"
+        r"(?:commit(?:[ \t]+(?:id|sha))?)|数据库版本|版本|提交(?:号|ID)?")
+    versions = []
+    for field in fields:
+        if meaningful_value(field):
+            versions.extend(m.group(0).removeprefix("v").removeprefix("V")
+                            for m in re.finditer(value, field, re.I))
+    # Free-form reports still support named database versions and commit IDs.
+    versions.extend(re.findall(
+        r"(?:postgresql|postgres|hpedb|ivorysql|\bpg)\s*[:：v=]?\s*(" +
+        revision + r"|" + release + r")(?![\w.])", source, re.I))
+    return list(dict.fromkeys(versions))[:5]
+
+
+def report_sections(text):
+    """Keep fenced content in its form section without treating code as headings."""
+    sections = []
+    heading, lines, fence = "", [], None
+    for line in text.splitlines():
+        marker = re.match(r"^[ \t]*(`{3,}|~{3,})", line)
+        if marker:
+            if fence is None:
+                fence = marker[1]
+            elif marker[1][0] == fence[0] and len(marker[1]) >= len(fence):
+                fence = None
+        match = re.match(r"^[ \t]*#{1,6}[ \t]+(.+?)[ \t]*$", line) if fence is None and not marker else None
+        if match:
+            sections.append((heading, "\n".join(lines)))
+            heading, lines = match[1].replace("**", ""), []
+        else:
+            lines.append(line)
+    sections.append((heading, "\n".join(lines)))
+    return sections
+
+
 def extract_details(issue, text, suggestions, config=None, model_text=None):
     models, model_missing = extract_reported_models(
         text if model_text is None else model_text, config or load_config())
     text = without_model_metadata(text)
     source = issue.get("title", "") + "\n" + text
-    versions = re.findall(
-        r"(?:postgresql|postgres|hpedb|ivorysql|\bpg|\bversion|版本)\s*[:：v=]?\s*"
-        r"(\d{1,2}(?:\.\d{1,3}){0,2}(?:\s*(?:beta|rc)\s*\d+)?)", source, re.I)
+    versions = database_versions(source)
     platforms = re.findall(r"\b(?:linux|windows|ubuntu|debian|centos|rhel|macos|darwin|"
                            r"freebsd|aarch64|arm64|x86_64)\b", source, re.I)
-    code_blocks = re.findall(r"```(?:sql|pgsql|postgresql)?\s*\n(.*?)```", source, re.I | re.S)
+    sections = report_sections(text)
+    # Environment scaffolding and pasted logs do not establish reproduction.
+    reproduction_text = "\n".join(content for heading, content in sections if not re.fullmatch(
+        r"OS version|Platform|Logs|Database version|IvorySQL version|PostgreSQL version|"
+        r"Server encoding|Compatible mode|Before submitting", heading, re.I))
+    fenced = re.findall(r"(?m)^[ \t]*(`{3,}|~{3,})([^\n]*)\n(.*?)^[ \t]*\1[ \t]*$", reproduction_text, re.S)
+    code_blocks = [code for _, _, code in fenced]
     has_sql = any(re.search(r"\b(select|create|insert|update|delete|alter|copy)\b", code, re.I)
                   for code in code_blocks)
     # These are clues for the reviewer, not proof that reproduction succeeds.
-    has_steps = bool(re.search(r"(?m)^\s*\d+[.)、]\s*\S+", text))
+    has_steps = bool(re.search(r"(?m)^\s*\d+[.)、]\s*\S+", reproduction_text))
+    reproduction = declared_fields(text,
+        r"Reproduction(?:[ \t]+steps)?|Steps[ \t]+to[ \t]+reproduce|"
+        r"Minimal[ \t]+(?:SQL|reproduction)|"
+        r"How can we reproduce it \(as minimally and precisely as possible\)\?|复现步骤|复现方法")
+    has_reproduction_field = any(meaningful_value(answer) for answer in reproduction)
+    has_commands = any((language.strip().casefold() in {
+        "sh", "bash", "shell", "console", "zsh", "powershell", "ps1", "cmd", "bat"
+    } or (not language.strip() and re.search(
+        r"(?m)^[ \t]*(?:\$[ \t]+|\./\S+|(?:meson|make|ninja|cmake|pg_ctl|psql|initdb)\b)", code)))
+        and any(meaningful_value(line) for line in code.splitlines()
+                if line.strip() and not line.lstrip().startswith(("#", "$ #", "//")))
+        for _, language, code in fenced)
+    has_reproduction = has_sql or has_steps or has_reproduction_field or has_commands
     errors = re.findall(r"(?im)^[ \t]*(?:ERROR|FATAL|PANIC|错误|致命错误)[ \t]*[:：].{1,250}", text)
     missing = []
-    if not text.strip():
+    descriptions = declared_fields(text, r"Description|What happened\?|Issue description|问题描述")
+    section_descriptions = [content for heading, content in sections
+                            if re.fullmatch(r"Description|What happened\?|Issue description|问题描述", heading, re.I)]
+    if section_descriptions:
+        descriptions = section_descriptions
+    if not meaningful_value(text) or (descriptions and not any(meaningful_value(v) for v in descriptions)):
         missing.append("Issue description")
     if any(s["label"] == "type/bug" for s in suggestions):
         if not versions:
             missing.append("Database version")
-        if not has_sql and not has_steps:
+        if not has_reproduction:
             missing.append("Reproduction steps or minimal SQL")
     missing.extend(model_missing)
-    return {"versions": list(dict.fromkeys(versions))[:5],
+    return {"versions": versions,
             "platforms": list(dict.fromkeys(p.casefold() for p in platforms))[:5],
-            "has_reproduction_clues": has_sql or has_steps,
+            "has_reproduction_clues": has_reproduction,
             "errors": errors[:3], "reported_models": models, "missing": missing}
 
 
@@ -576,10 +648,36 @@ def read_state(comment):
         state = json.loads(base64.b64decode(match[1], validate=True))
         if (isinstance(state, dict) and all(isinstance(state.get(k), list)
                 and all(isinstance(v, str) for v in state[k]) for k in empty)):
-            return {k: state[k] for k in empty}
+            result = {k: state[k] for k in empty}
+            pending = state.get("pending")
+            if pending is not None:
+                if (not isinstance(pending, dict) or set(pending) != {"add", "remove"}
+                        or not all(isinstance(pending[k], list)
+                                   and all(isinstance(v, str) for v in pending[k]) for k in pending)):
+                    return empty
+                result["pending"] = pending
+            return result
     except (ValueError, TypeError):
         pass
     return empty
+
+
+def recover_state(previous, current):
+    """Reconcile a durable intent with the labels actually present after a failure."""
+    pending = previous.get("pending")
+    if pending is None:
+        return previous
+    managed = set(previous["managed"])
+    # Missing planned removals were completed, rather than manually suppressed.
+    managed -= set(pending["remove"]) - current
+    # Only additions that actually reached GitHub may be owned by this run.
+    managed |= set(pending["add"]) & current
+    return {"managed": sorted(managed), "suppressed": previous["suppressed"]}
+
+
+def state_marker(state):
+    encoded = base64.b64encode(json.dumps(state, sort_keys=True).encode()).decode()
+    return "<!-- triage-state:" + encoded + " -->"
 
 
 def label_plan(issue, suggestions, previous, missing=None):
@@ -590,7 +688,10 @@ def label_plan(issue, suggestions, previous, missing=None):
             "needs-triage", "triage/needs-information")
 
     managed = {n for n in previous["managed"] if bot_owned(n)}
-    suppressed = set(previous["suppressed"]) | (managed - current)
+    # The waiting stage is workflow-owned, including labels added by a template.
+    if "needs-triage" in current:
+        managed.add("needs-triage")
+    suppressed = (set(previous["suppressed"]) | (managed - current)) - {"needs-triage"}
     manual = current - managed
     desired = set()
     for prefix in ("type/", "area/", "ai-model/"):
@@ -649,7 +750,6 @@ def render_comment(repository, suggestions, similar, plan, details, ai_status, n
         similar_lines.append("  " + safe_text(item["reason"]))
     if not similar:
         similar_lines.append("- No candidate met the threshold in this search. Related or duplicate issues may still exist.")
-    encoded = base64.b64encode(json.dumps(plan["state"], sort_keys=True).encode()).decode()
     context = {
         "marker": MARKER,
         "classification": "\n".join(rows),
@@ -658,7 +758,7 @@ def render_comment(repository, suggestions, similar, plan, details, ai_status, n
         "versions": safe_text(", ".join(details["versions"]) or "Not identified"),
         "platforms": safe_text(", ".join(details["platforms"]) or "Not identified"),
         "reported_models": safe_text(", ".join(m["name"] for m in details["reported_models"]) or "Missing or incomplete declaration"),
-        "reproduction": "SQL or numbered steps found; reproduction still needs verification" if details["has_reproduction_clues"] else "Not identified",
+        "reproduction": "Reproduction instructions or code found; reproduction still needs verification" if details["has_reproduction_clues"] else "Not identified",
         "errors": safe_text("; ".join(details["errors"]) or "Not identified"),
         "missing": "\n".join("- [ ] " + safe_text(m) for m in details["missing"]) or "- No missing required information identified.",
         "similar": "\n".join(similar_lines),
@@ -666,7 +766,7 @@ def render_comment(repository, suggestions, similar, plan, details, ai_status, n
         "remove_labels": show_labels(plan["remove"]),
         "ai_status": safe_text(ai_status),
         "notes": "\n".join("- " + safe_text(n) for n in notes) or "- No additional notes.",
-        "state": f"<!-- triage-state:{encoded} -->",
+        "state": state_marker(plan["state"]),
     }
     return Template(COMMENT_TEMPLATE.read_text(encoding="utf-8")).substitute(context).rstrip()
 
@@ -692,7 +792,7 @@ def analyze(github, number, config, apply=False, ai_env=None, target_kind="issue
         return {"issue": number, "kind": kind, "skipped": "Closed issue or triage/skip label"}
     comments = github.comments(number)
     old_comment = bot_comment(comments)
-    previous = read_state(old_comment)
+    previous = recover_state(read_state(old_comment), label_names(issue))
     text = reporter_text(issue, comments)
     suggestions = classify(issue, text, config)
     history, capped = github.history(config["history_limit"])
@@ -753,13 +853,23 @@ def analyze(github, number, config, apply=False, ai_env=None, target_kind="issue
         # Do not apply a stale decision after a human update during analysis.
         if not unchanged(issue, github.issue(number)) or comments != github.comments(number):
             raise RuntimeError("Issue changed during analysis; rerun triage")
-        github.ensure_labels(config, plan["add"])
+        # Persist ownership intent before changing issue labels. A later run can
+        # recover even when a request succeeded but its response was lost.
+        journal = dict(previous, pending={"add": plan["add"], "remove": plan["remove"]})
+        pending_body = body.replace(state_marker(plan["state"]),
+            "Writeback pending: label changes may be incomplete. Rerun triage to recover.\n\n" + state_marker(journal))
+        if plan["add"] or plan["remove"]:
+            if old_comment:
+                github.call(f"{github.root}/issues/comments/{old_comment['id']}", "PATCH", {"body": pending_body})
+            else:
+                old_comment = github.call(f"{github.root}/issues/{number}/comments", "POST", {"body": pending_body})
+            github.ensure_labels(config, plan["add"])
         if plan["add"]:
             github.call(f"{github.root}/issues/{number}/labels", "POST", {"labels": plan["add"]})
         for name in plan["remove"]:
             github.call(f"{github.root}/issues/{number}/labels/" + quote(name, safe=""), "DELETE")
         if old_comment:
-            if old_comment["body"] != body:
+            if plan["add"] or plan["remove"] or old_comment["body"] != body:
                 github.call(f"{github.root}/issues/comments/{old_comment['id']}", "PATCH", {"body": body})
         else:
             github.call(f"{github.root}/issues/{number}/comments", "POST", {"body": body})

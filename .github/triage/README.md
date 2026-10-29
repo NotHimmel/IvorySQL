@@ -19,24 +19,33 @@ thresholds, and limits:
   These are repository labels based on PG documentation, not official PG issue labels.
 - Models: `ai-model/*` records the model explicitly declared by the reporter.
   Every issue type requires a declaration, including an explicit `not used` if applicable.
-- Stage: `needs-triage` remains until a maintainer accepts the issue using
-  `triage/accepted`. Automated classification does not imply acceptance.
+- Stage: `needs-triage` is workflow-managed, including when added by a template.
+  On the next triage run, acceptance (`triage/accepted`) or any `resolution/*`
+  label removes it. Removing acceptance and resolution restores it for open
+  issues on the next run. Automated classification does not imply acceptance.
 - Information: `triage/needs-information` can coexist with acceptance. Missing model
   declarations, empty descriptions, and bug reports without an identified version or
-  reproduction clues produce a specific checklist. SQL or numbered steps are clues,
-  not proof that reproduction succeeds.
+  reproduction clues produce a specific checklist. Releases, `master`/`main`,
+  PostgreSQL stable branches, and explicit commit IDs count as version information.
+  Reproduction fields can contain prose; SQL, shell commands, and numbered steps
+  are also accepted clues. Environment scaffolding and log sections are excluded.
+  These checks do not prove that reproduction succeeds.
 - Resolutions: `resolution/duplicate`, `resolution/invalid`, `resolution/wontfix` are
   maintainer decisions. Confirmed duplicates should link to their original issue.
 - `triage/skip` is manually applied by maintainers to exclude an issue from all
   triage runs, including manual runs. The bot never adds this label. Removing it
   allows processing on the next supported event or manual run.
 
-Manual labels take precedence. The bot removes only labels it added and recorded in
-its comment. A manually set information-request label is also retained. Removing a
+Manual classification labels take precedence. Except for the workflow-managed
+`needs-triage` stage, the bot removes only labels it added and recorded in its
+comment. A manually set information-request label is also retained. Removing a
 bot-managed type, area, or model label freezes automation for that group. To reset
 ownership, delete the bot comment and rerun; existing labels remain manual labels.
 Only the dedicated comment authored by `github-actions[bot]` supplies ownership
 state. Missing, malformed, or copied user-authored state cannot claim ownership.
+
+Adding or removing labels does not trigger a run. Use a manual `apply` run to
+reconcile stage labels immediately, or wait for the next supported event.
 
 ## Declaring the report's AI model
 
@@ -97,6 +106,27 @@ fields have been supplied; manual information requests remain for maintainers.
 AI supplies data rather than formatting. Untrusted content is escaped, including
 mentions, links, headings, and hidden markers. Existing bot comments are updated
 in place. [example-comment.md](example-comment.md) is the tested offline rendering.
+
+## Interrupted writeback
+
+Before changing issue labels, an apply run saves a pending writeback record in the
+same trusted bot comment. If saving the record fails, issue labels are not changed.
+The record retains previous ownership and planned additions/removals. After the
+label requests succeed, the comment is finalized with the resulting ownership.
+
+If label creation, label updates, or comment finalization fails, the run fails and
+the comment may show `Writeback pending`. Rerun the issue in `apply` mode to recover.
+Recovery reads current labels, adopts only additions actually present, and treats
+completed removals as completed work rather than human suppression. It reanalyzes
+the latest report instead of replaying an outdated decision. Preview remains
+read-only and does not finalize a pending record. Old comments without pending
+records remain compatible.
+
+GitHub does not provide an atomic label-and-comment transaction. A pending record
+cannot distinguish an interrupted bot addition from a human adding the exact same
+label during the interruption, or an unfinished addition from a later human removal.
+Human replacement labels and unrelated labels remain protected. Keep the pending
+comment until recovery completes so that ownership evidence is not lost.
 
 ## Deployment and manual ranges
 
@@ -233,8 +263,9 @@ failures, and return a nonzero status if any item failed. Result JSON and option
 
 The checks workflow runs offline tests when automation or issue templates change.
 It does not read model credentials. Tests cover bilingual classification, model
-declarations, manual overrides, stable comments, range parsing, partial failures,
-PR skipping, stale analysis, credential masking, and provider fallback.
+declarations, form-version and reproduction extraction, stage transitions, manual
+overrides, stable comments, range parsing, interrupted writeback before and after
+server mutations, PR skipping, stale analysis, credential masking, and provider fallback.
 
 ## Classification references
 
