@@ -9,14 +9,25 @@ body:
       options: [bug, feature, enhancement]
     validations:
       required: false
-  - type: textarea
+  - type: dropdown
+    id: ai_usage
+    attributes:
+      label: AI usage
+      description: Did you use AI to discover, investigate, or write this issue?
+      options: ["Not used", "Used"]
+      default: 0
+    validations:
+      required: true
+
+  - type: input
     id: ai_model
     attributes:
       label: AI model
-      description: Specify models used to discover, investigate, or write this report. Separate up to five names/versions with commas or newlines. Write "not used" when applicable; a tool name alone is insufficient.
-      placeholder: org/model-a-v2, model-b-v1, or not used
+      description: If you selected Used, provide model names and versions (up to five, separated by commas). Leave blank for Not used. A tool name alone is insufficient.
+      placeholder: org/model-a-v2, model-b-v1
     validations:
-      required: true
+      required: false
+
   - type: textarea
     id: description
     attributes:

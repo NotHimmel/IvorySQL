@@ -23,6 +23,7 @@ from urllib.request import build_opener, HTTPRedirectHandler, Request
 CONFIG = Path(__file__).with_name("config.json")
 COMMENT_TEMPLATE = Path(__file__).with_name("comment.md")
 MODEL_FIELD = r"(?:AI[ \t_-]*models?|(?:使用的[ \t]*)?(?:AI[ \t]*)?模型(?:名称)?|models?[ \t]+used)"
+AI_USAGE_FIELD = r"AI[ \t_-]+usage"
 MARKER = "<!-- ivorysql-issue-triage:v1 -->"
 STATE_RE = re.compile(r"<!-- triage-state:([A-Za-z0-9+/=]+) -->")
 BOT = "github-actions[bot]"
@@ -52,7 +53,7 @@ FIELD_PATTERNS = {
     "Expected behavior": r"Expected(?:[ \t]+(?:behaviou?r|results?|output))?|What did you expect to happen\?|预期(?:行为|结果)",
     "Compatible mode": r"Compatible[ \t]+mode|Compatibility[ \t]+mode|兼容模式",
     "Server encoding": r"Server[ \t]+encoding|Database[ \t]+encoding|服务端编码|服务器编码",
-    "AI model": MODEL_FIELD,
+    "AI model": MODEL_FIELD + "|" + AI_USAGE_FIELD,
 }
 ENCODING = r"\b(?:UTF-?8|SQL_ASCII|LATIN\d+|WIN\d+|EUC_\w+|SJIS|BIG5|GB\w+|KOI8\w*|MULE_INTERNAL|ISO_8859_\d+|UHC|JOHAB|SHIFT_JIS_2004)\b"
 
@@ -344,6 +345,12 @@ def model_label(name):
 def extract_reported_models(text, config):
     values = declared_fields(text, MODEL_FIELD)
     missing = "AI model used for this report (name/version; explicitly state 'not used' when applicable)"
+    usage_values = declared_fields(text, AI_USAGE_FIELD)
+    usage = usage_values[-1].strip("`*_ \t\r\n").casefold() if usage_values else None
+    if usage is not None and usage not in {"not used", "used"}:
+        return [], [missing]
+    if usage == "not used" and (not values or not meaningful_value(values[-1])):
+        values = ["not used"]
     if not values:
         return [], [missing]
     # The most recent explicit declaration corrects earlier declarations.
@@ -355,6 +362,12 @@ def extract_reported_models(text, config):
         return [], [missing]
     not_used = {v.casefold() for v in settings["not_used_values"]}
     incomplete = {v.casefold() for v in settings["incomplete_values"]}
+    if usage == "not used":
+        if any(name.casefold() not in not_used for name in names):
+            return [], [missing + "; the model field contradicts AI usage: Not used"]
+        names = ["not used"]
+    elif usage == "used" and any(name.casefold() in not_used for name in names):
+        return [], [missing + "; provide a model name or change AI usage to Not used"]
     if any(name.casefold() in not_used for name in names):
         if len(names) == 1:
             return [{"name": "No AI used", "label": "ai-model/not-used", "evidence": names[0]}], []
@@ -373,7 +386,7 @@ def extract_reported_models(text, config):
 
 def without_model_metadata(text):
     # Reporting provenance is not a database version, subsystem, or bug symptom.
-    field = r"(?:\*\*)?(?:" + MODEL_FIELD + r")(?:\*\*)?"
+    field = r"(?:\*\*)?(?:" + MODEL_FIELD + "|" + AI_USAGE_FIELD + r")(?:\*\*)?"
     text = re.sub(r"^[ \t]*#{1,6}[ \t]+" + field +
                   r"[ \t]*(?:[:：][^\n]*)?\n.*?(?=^[ \t]*#{1,6}[ \t]+|\Z)",
                   "", text, flags=re.I | re.M | re.S)
@@ -473,7 +486,14 @@ def resolve_fields(records, previous=None):
         for record in records:
             if not declared_fields(record["text"], pattern):
                 continue
-            value = submission_answer([record["text"]], pattern)
+            if name == "AI model":
+                # Treat the choice and optional model as one disclosure so that
+                # a later declaration can correct either part consistently.
+                value = submission_answer([record["text"]], MODEL_FIELD)
+                if declared_fields(record["text"], AI_USAGE_FIELD):
+                    value += "\n\nAI usage: " + submission_answer([record["text"]], AI_USAGE_FIELD)
+            else:
+                value = submission_answer([record["text"]], pattern)
             entry = {"value_sha256": digest(value), "updated_at": record["updated_at"]}
             old = history.get(record["source"], {}).get(name)
             if old and old["value_sha256"] == entry["value_sha256"]:
@@ -723,7 +743,7 @@ def submission_answer(sources, field):
                 # An inline follow-up field must not fill a preceding empty field.
                 if fence is None and not marker and re.match(
                         r"^[ \t]*(?:Issue type|Description|Database version|Reproduction steps|"
-                        r"Expected behavior|Compatible mode|Server encoding|AI models?|"
+                        r"Expected behavior|Compatible mode|Server encoding|AI models?|AI usage|"
                         r"Reproduced in a real environment|Reproduction verified)[ \t]*[:：]", line, re.I):
                     break
                 lines.append(line)

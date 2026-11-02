@@ -152,7 +152,13 @@ previews and a manual `apply` run is needed to publish the guidance.
 ## Declaring the report's AI model
 
 The new [issue form](../ISSUE_TEMPLATE/issue.yml) and existing repository templates
-include an `AI model` field. API, CLI, and other submission paths are checked too.
+include an `AI usage` dropdown, preselected to `Not used`, and an optional
+`AI model` field. Choose `Used` and supply model names/versions when AI helped
+discover, investigate, or write the issue. The bot requests missing model details
+only when needed; `Not used` with a blank model field maps to `ai-model/not-used`.
+GitHub forms cannot conditionally require the model field, so the bot checks it.
+API, CLI, and other submission paths still need an explicit disclosure; a missing
+field does not imply `Not used`. Legacy model-only declarations remain accepted.
 Adding a model label does not replace a written reporter declaration.
 
 Accepted examples:
@@ -170,6 +176,11 @@ org/model-a-v2, model-b-v1
 ```text
 AI model: not used
 ```
+
+The usage choice and optional model field form one declaration for update
+ordering. A later model-only comment can correct an earlier `Not used` selection;
+a later `Not used` selection clears an older model declaration. Contradictory
+answers in one declaration require clarification.
 
 A reporter comment or body edit can supply or correct this field. The field-source
 rules below determine which declaration is current. Ordinary subsequent comments
