@@ -15,6 +15,7 @@ import triage
 def issue(number=20, title="Bug: logical replication crashes",
           body="PostgreSQL 18.1 on Linux\n\nAI model: test-model-v1", labels=()):
     return {"number": number, "title": title, "body": body, "state": "open",
+            "created_at": "2026-10-26T00:00:00Z", "body_updated_at": "2026-10-26T00:00:00Z",
             "updated_at": "2026-10-26T00:00:00Z", "labels": list(labels),
             "user": {"login": "reporter", "type": "User"}}
 
@@ -35,7 +36,11 @@ class FakeGitHub:
         return copy.deepcopy(self.current)
 
     def comments(self, number):
-        return copy.deepcopy(self.thread)
+        comments = copy.deepcopy(self.thread)
+        for index, comment in enumerate(comments):
+            comment.setdefault("created_at", "2026-10-27T00:00:00." + f"{index:06}" + "Z")
+            comment.setdefault("updated_at", comment["created_at"])
+        return comments
 
     def history(self, limit):
         return copy.deepcopy(self.records[:limit]), len(self.records) >= limit

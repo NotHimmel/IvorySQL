@@ -4,6 +4,7 @@
 import argparse
 import base64
 from collections import Counter
+from datetime import datetime
 import hashlib
 import html
 import json
@@ -40,6 +41,17 @@ SUBMISSION_FIELDS = {
     "Server encoding": ("Server encoding", "Provide SHOW server_encoding output; otherwise explain why it is not applicable."),
     "AI model": ("AI model", "Give the model name/version, or explicitly state not used; a tool name alone is insufficient."),
 }
+FIELD_PATTERNS = {
+    "Issue type": r"Issue[ \t]+type|问题类型",
+    "Issue description": r"Description|What happened\?|Issue description|Feature Request|Enhancement|问题描述",
+    "Database version": r"(?:(?:database|ivorysql|postgresql|postgres|hpedb)[ \t]+)?version|commit(?:[ \t]+(?:id|sha))?|数据库版本|版本|提交(?:号|ID)?",
+    "Reproduction steps or minimal SQL": r"Reproduction(?:[ \t]+steps)?|Steps[ \t]+to[ \t]+reproduce|Minimal[ \t]+(?:SQL|reproduction)|How can we reproduce it \(as minimally and precisely as possible\)\?|复现步骤|复现方法",
+    "Expected behavior": r"Expected(?:[ \t]+(?:behaviou?r|results?|output))?|What did you expect to happen\?|预期(?:行为|结果)",
+    "Compatible mode": r"Compatible[ \t]+mode|Compatibility[ \t]+mode|兼容模式",
+    "Server encoding": r"Server[ \t]+encoding|Database[ \t]+encoding|服务端编码|服务器编码",
+    "AI model": MODEL_FIELD,
+}
+ENCODING = r"\b(?:UTF-?8|SQL_ASCII|LATIN\d+|WIN\d+|EUC_\w+|SJIS|BIG5|GB\w+|KOI8\w*|MULE_INTERNAL|ISO_8859_\d+|UHC|JOHAB|SHIFT_JIS_2004)\b"
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -136,7 +148,27 @@ class GitHub:
         return result[:limit]
 
     def issue(self, number):
-        return self.call(f"{self.root}/issues/{number}")
+        issue = self.call(f"{self.root}/issues/{number}")
+        if "pull_request" in issue:
+            return issue
+        owner, name = self.repository.split("/", 1)
+        query = """query($owner: String!, $name: String!, $number: Int!) {
+          repository(owner: $owner, name: $name) {
+            issue(number: $number) { body createdAt lastEditedAt }
+          }
+        }"""
+        try:
+            result = request_json("https://api.github.com/graphql", self.token, "POST", {
+                "query": query, "variables": {"owner": owner, "name": name, "number": number}})
+            revision = result["data"]["repository"]["issue"]
+            if revision["body"] != (issue.get("body") or ""):
+                raise ValueError("Inconsistent issue body snapshots")
+            issue["body_updated_at"] = revision["lastEditedAt"] or revision["createdAt"]
+        except (RuntimeError, ValueError, KeyError, TypeError):
+            # REST updated_at also changes on comments and labels, so it cannot
+            # safely rank a body answer against a comment after this lookup fails.
+            issue["body_updated_at"] = None
+        return issue
 
     def comments(self, number):
         # Fail explicitly if the state comment or reporter follow-up could be omitted.
@@ -336,15 +368,6 @@ def extract_reported_models(text, config):
     return list(models.values()), []
 
 
-def reporter_model_text(issue, comments):
-    author = issue.get("user", {}).get("login")
-    authored = [c for c in comments if author and c.get("user", {}).get("login") == author
-                and c.get("user", {}).get("type") != "Bot"]
-    authored.sort(key=lambda c: c.get("updated_at") or c.get("created_at") or "")
-    sources = [issue.get("body") or ""] + [c.get("body") or "" for c in authored]
-    return next((source for source in reversed(sources) if declared_fields(source, MODEL_FIELD)), "")
-
-
 def without_model_metadata(text):
     # Reporting provenance is not a database version, subsystem, or bug symptom.
     field = r"(?:\*\*)?(?:" + MODEL_FIELD + r")(?:\*\*)?"
@@ -370,13 +393,110 @@ def reporter_text(issue, comments):
             "\n".join(followups[-5:])[-8000:]).strip()
 
 
-def submission_sources(issue, comments):
-    """Keep author supplements separate so a previous form section cannot swallow them."""
+def digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False,
+                                    separators=(",", ":")).encode()).hexdigest()
+
+
+def timestamp(value):
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return parsed.timestamp() if parsed.tzinfo else None
+    except (AttributeError, TypeError, ValueError):
+        return None
+
+
+def unwrap_field_reply(text, requested=()):
+    """Accept a filled field-only reply, while leaving logs and quoted examples fenced."""
+    match = re.fullmatch(r"\s*(`{3,}|~{3,})(?:text|markdown|md)?[ \t]*\n(.*?)\n\1\s*", text, re.S | re.I)
+    if not match:
+        return text
+    found = set()
+    for line in match[2].splitlines():
+        if not line.strip():
+            continue
+        keys = [name for name, pattern in FIELD_PATTERNS.items()
+                if re.fullmatch(r"\s*(?:" + pattern + r")\s*[:：].*", line, re.I)]
+        if not keys:
+            return text
+        found.update(keys)
+    if len(found) >= 2 or (len(found) == 1 and found <= set(requested)):
+        return match[2]
+    return text
+
+
+def report_records(issue, comments, requested=()):
     author = issue.get("user", {}).get("login")
-    followups = [c for c in comments if author and c.get("user", {}).get("login") == author
-                 and c.get("user", {}).get("type") != "Bot"]
-    followups.sort(key=lambda c: c.get("updated_at") or c.get("created_at") or "")
-    return [issue.get("body") or ""] + [c.get("body") or "" for c in followups]
+    records = [{"source": "body", "text": unwrap_field_reply(issue.get("body") or "", requested),
+                "content_sha256": digest(issue.get("body") or ""),
+                "updated_at": issue.get("body_updated_at", issue.get("created_at"))}]
+    for index, comment in enumerate(comments):
+        if (author and comment.get("user", {}).get("login") == author
+                and comment.get("user", {}).get("type") != "Bot"):
+            records.append({"source": "comment:" + str(comment.get("id", index)),
+                            "text": unwrap_field_reply(comment.get("body") or "", requested),
+                            "content_sha256": digest(comment.get("body") or ""),
+                            "updated_at": comment.get("updated_at") or comment.get("created_at")})
+    # Stable ordering preserves API order for legacy fixtures without edit times.
+    for record in records:
+        if timestamp(record["updated_at"]) is None:
+            record["updated_at"] = None
+    return sorted(records, key=lambda record: timestamp(record["updated_at"]) or 0)
+
+
+def source_watermark(records):
+    dated = [record["updated_at"] for record in records if timestamp(record["updated_at"]) is not None]
+    return {"latest_update_at": max(dated, key=timestamp) if dated else None,
+            "latest_comment_id": max([int(record["source"].split(":")[1]) for record in records
+                                      if re.fullmatch(r"comment:\d+", record["source"])] or [0])}
+
+
+def resolve_fields(records, previous=None):
+    previous = previous or {}
+    history = previous.get("field_history", {})
+    watermark = previous.get("source_watermark", {})
+    answers, provenance, conflicts, retained = {}, {}, [], {}
+    for name, pattern in FIELD_PATTERNS.items():
+        candidates = []
+        for record in records:
+            if not declared_fields(record["text"], pattern):
+                continue
+            value = submission_answer([record["text"]], pattern)
+            entry = {"value_sha256": digest(value), "updated_at": record["updated_at"]}
+            old = history.get(record["source"], {}).get(name)
+            if old and old["value_sha256"] == entry["value_sha256"]:
+                entry["updated_at"] = old["updated_at"]
+            elif (not old and watermark and record["source"].startswith("comment:")
+                  and int(record["source"].split(":")[1]) <= watermark["latest_comment_id"]
+                  and (timestamp(record["updated_at"]) or 0) > (timestamp(watermark["latest_update_at"]) or 0)):
+                # An old, untracked comment was edited. Its unchanged fields
+                # cannot safely inherit the timestamp of an unrelated edit.
+                entry["updated_at"] = None
+            candidates.append((record, value, entry))
+        if not candidates:
+            continue
+        candidates.sort(key=lambda item: timestamp(item[2]["updated_at"]) or 0)
+        record, value, entry = candidates[-1]
+        answers[name] = value
+        provenance[name] = dict(entry, source=record["source"])
+        differing = [(item, answer, evidence) for item, answer, evidence in candidates
+                     if " ".join(answer.casefold().split()) != " ".join(value.casefold().split())]
+        if differing and (timestamp(entry["updated_at"]) is None or any(
+                timestamp(evidence["updated_at"]) is None
+                or timestamp(evidence["updated_at"]) == timestamp(entry["updated_at"]) for _, _, evidence in differing)):
+            conflicts.append(name)
+        # Retain the body, two recent comments, and one unresolved declaration.
+        # An uncertain old comment must not become authoritative on a rerun.
+        retained_candidates = [item for item in candidates if item[0]["source"] != "body"][-2:]
+        retained_candidates += [item for item in candidates if item[0]["source"] == "body"]
+        retained_candidates += [item for item in candidates if item[2]["updated_at"] is None][-1:]
+        for item, _, evidence in retained_candidates:
+            retained.setdefault(item["source"], {})[name] = evidence
+    return answers, provenance, conflicts, retained
+
+
+def source_versions(records):
+    return {record["source"]: digest([record["content_sha256"], record["updated_at"]]) for record in records}
 
 
 def classify(issue, text, config):
@@ -480,7 +600,7 @@ def database_versions(source):
     """Recognize release numbers, development branches, and explicit commit IDs."""
     release = r"\d{1,2}(?:\.\d{1,3}){0,2}(?:\s*(?:beta|rc)\s*\d+)?"
     revision = r"(?:master|main|[a-f0-9]{7,40}|REL_\d[\w.-]*_STABLE)"
-    value = r"(?<![\w.])(?:" + revision + r"|v?(?:" + release + r"))(?![\w.])"
+    value = r"(?<![\w.])(?:" + revision + r"|v?(?:" + release + r"))(?!\w|\.\d)"
     fields = declared_fields(source,
         r"(?:(?:database|ivorysql|postgresql|postgres|hpedb)[ \t]+)?version|"
         r"(?:commit(?:[ \t]+(?:id|sha))?)|数据库版本|版本|提交(?:号|ID)?")
@@ -492,7 +612,7 @@ def database_versions(source):
     # Free-form reports still support named database versions and commit IDs.
     versions.extend(re.findall(
         r"(?:postgresql|postgres|hpedb|ivorysql|\bpg)\s*[:：v=]?\s*(" +
-        revision + r"|" + release + r")(?![\w.])", source, re.I))
+        revision + r"|" + release + r")(?!\w|\.\d)", source, re.I))
     return list(dict.fromkeys(versions))[:5]
 
 
@@ -598,23 +718,57 @@ def submission_answer(sources, field):
     return ""
 
 
-def check_submission(issue, comments, suggestions, config):
-    sources = submission_sources(issue, comments)
+def check_submission(issue, comments, suggestions, config, previous=None):
+    requested = (previous or {}).get("request", {}).get("fields", [])
+    records = report_records(issue, comments, requested)
+    sources = [record["text"] for record in records]
+    answers, provenance, conflicts, history = resolve_fields(records, previous)
     # Completeness checks use all author supplements, independently of the shorter
     # text sent to the external model. A boundary resets form-section context.
     text = "\n\n# Reporter follow-up\n\n".join(sources)
-    details = extract_details(issue, text, suggestions, config, reporter_model_text(issue, comments))
+    model_text = "### AI model\n\n" + answers["AI model"] if "AI model" in answers else ""
+    details = extract_details(issue, text, suggestions, config, model_text)
     missing = details["missing"]
+
+    def require(name, valid):
+        missing[:] = [item for item in missing if item != name]
+        if not valid:
+            missing.append(name)
+
     types = {s["label"] for s in suggestions if s["label"].startswith("type/")}
     if len(types) != 1:
         missing.insert(0, "Issue type")
-    expected = submission_answer(sources,
-        r"Expected(?:[ \t]+(?:behaviou?r|results?|output))?|What did you expect to happen\?|预期(?:行为|结果)")
-    mode = submission_answer(sources, r"Compatible[ \t]+mode|Compatibility[ \t]+mode|兼容模式")
-    encoding = submission_answer(sources, r"Server[ \t]+encoding|Database[ \t]+encoding|服务端编码|服务器编码")
+    if "Database version" in answers:
+        details["versions"] = database_versions("Database version: " + answers["Database version"])
+    if "Reproduction steps or minimal SQL" in answers:
+        details["has_reproduction_clues"] = meaningful_value(answers["Reproduction steps or minimal SQL"])
+    expected = answers.get("Expected behavior", "")
+    mode = answers.get("Compatible mode", "")
+    encoding = answers.get("Server encoding", "")
+    # Only unquoted prose supplies inferred settings; logs remain evidence rather
+    # than declarations. Explicit answers, including placeholders, take priority.
+    prose = without_model_metadata(text)
+    prose = re.sub(r"(?ms)^[ \t]*(`{3,}|~{3,})[^\n]*\n.*?^[ \t]*\1[ \t]*$", "", prose)
+    prose = re.sub(r"(?m)^[ \t]*>.*$", "", re.sub(r"<!--.*?-->", "", prose, flags=re.S))
+    if "Expected behavior" not in answers:
+        hit = re.search(r"(?im)\b(?:I|we) expect(?:ed)?\s+([^\n]+)", prose)
+        expected = hit[1] if hit else ""
+    if "Compatible mode" not in answers:
+        hit = re.search(r"\b(?:in|using)\s+(oracle|pg|both|postgresql)\s+(?:compatib\w+\s+)?mode\b", prose, re.I)
+        mode = hit[1] if hit else ""
+    if "Server encoding" not in answers:
+        hit = re.search(r"(" + ENCODING + r")\s+encoding\b", prose, re.I)
+        encoding = hit[1] if hit else ""
+    elif encoding.strip().casefold() == "other":
+        additional = [content for source in sources for heading, content in report_sections(source)
+                      if re.fullmatch(r"Anything else we need to know\?|Additional information", heading, re.I)]
+        values = list(dict.fromkeys(re.findall(ENCODING, "\n".join(additional), re.I)))
+        if len(values) == 1:
+            encoding = values[0]
     if "type/bug" in types:
-        if not meaningful_value(expected):
-            missing.append("Expected behavior")
+        require("Database version", bool(details["versions"]))
+        require("Reproduction steps or minimal SQL", details["has_reproduction_clues"])
+        require("Expected behavior", meaningful_value(expected))
         # Build failures do not have a running server whose settings can be read.
         areas = {s["label"] for s in suggestions if s["label"].startswith("area/")}
         build_only = "area/build" in areas and areas <= {"area/build", "area/testing"}
@@ -622,16 +776,12 @@ def check_submission(issue, comments, suggestions, config):
             def not_applicable(value):
                 return bool(re.match(r"(?:not applicable|n/a)\s*[:(\-]\s*\S.{3,}", value, re.I))
 
-            if not (meaningful_value(mode) and (re.search(r"\b(?:oracle|pg|both|postgresql)\b", mode, re.I)
-                                               or not_applicable(mode))):
-                missing.append("Compatible mode")
-            if not (meaningful_value(encoding) and (not_applicable(encoding) or (
-                    re.search(r"\b(?:UTF-?8|SQL_ASCII|LATIN\d+|WIN\d+|EUC_\w+|SJIS|BIG5|GB\w+|KOI8\w*|"
-                              r"MULE_INTERNAL|ISO_8859_\d+|UHC|JOHAB|SHIFT_JIS_2004)\b", encoding, re.I)))):
-                missing.append("Server encoding")
-    description_field = r"Description|What happened\?|Issue description|Feature Request|Enhancement|问题描述"
-    description = submission_answer(sources, description_field)
-    has_description_field = any(declared_fields(source, description_field) for source in sources)
+            require("Compatible mode", meaningful_value(mode) and (
+                re.search(r"\b(?:oracle|pg|both|postgresql)\b", mode, re.I) or not_applicable(mode)))
+            require("Server encoding", meaningful_value(encoding) and (
+                not_applicable(encoding) or re.search(ENCODING, encoding, re.I)))
+    description = answers.get("Issue description", "")
+    has_description_field = "Issue description" in answers
     if has_description_field and meaningful_value(description):
         missing = [name for name in missing if name != "Issue description"]
     elif has_description_field:
@@ -645,6 +795,9 @@ def check_submission(issue, comments, suggestions, config):
     details["compatible_mode"] = mode
     details["server_encoding"] = encoding
     details["missing"] = list(dict.fromkeys(missing))
+    details["field_sources"] = provenance
+    details["conflicts"] = conflicts
+    details["field_history"] = history
     return details
 
 
@@ -652,7 +805,56 @@ def submission_field(name):
     return SUBMISSION_FIELDS["AI model" if name.startswith("AI model") else name]
 
 
-def submission_guidance(repository, missing):
+def review_state(issue, comments, details, previous):
+    if "triage/accepted" in label_names(issue) or any(n.startswith("resolution/") for n in label_names(issue)):
+        return {"review_status": "maintainer-reviewed"}
+    if "triage/needs-review" in label_names(issue) and "triage/needs-review" not in previous["managed"]:
+        return {"review_status": "needs-review"}
+    if details["conflicts"]:
+        return dict({"review_status": "needs-review"}, **({"request": previous["request"]} if previous.get("request") else {}))
+    if not details["missing"]:
+        return {"review_status": "complete"}
+    request = previous.get("request", {})
+    records = report_records(issue, comments, request.get("fields", []))
+    versions = source_versions(records)
+    changed = [record for record in records
+               if request and ((record["source"] == "body" and versions["body"] != request["body_sha256"])
+                   or (record["source"].startswith("comment:") and int(record["source"].split(":")[1]) > request["latest_comment_id"])
+                   or (timestamp(record["updated_at"]) or 0) > (timestamp(request["latest_update_at"]) or 0))]
+    structured = any(declared_fields(record["text"], pattern)
+                     for record in changed for pattern in FIELD_PATTERNS.values())
+    evidence_changed = bool(request and digest(versions) != request["evidence_sha256"])
+    if ((previous.get("review_status") == "needs-review" and not structured)
+            or (evidence_changed and not changed)
+            or (changed and not structured and any(meaningful_value(record["text"]) for record in changed))):
+        return dict({"review_status": "needs-review"}, **({"request": request} if request else {}))
+    return {"review_status": "needs-information", "request": {
+        **source_watermark(records), "evidence_sha256": digest(versions), "body_sha256": versions["body"],
+        "fields": list(dict.fromkeys(
+            "AI model" if name.startswith("AI model") else name for name in details["missing"]))}}
+
+
+def input_fingerprint(issue, comments, config, ai_env, labels=None):
+    """Bind cached decisions to author evidence, labels, policy, and model settings."""
+    author = issue.get("user", {}).get("login")
+    records = [{key: comment.get(key) for key in ("id", "body", "created_at", "updated_at")}
+               for comment in comments if author and comment.get("user", {}).get("login") == author
+               and comment.get("user", {}).get("type") != "Bot"]
+    return digest({"issue": {key: issue.get(key) for key in (
+        "number", "title", "body", "state", "body_updated_at")},
+        "author": author, "comments": records,
+        "labels": sorted(label_names(issue) if labels is None else labels),
+        "policy": [config, digest(Path(__file__).read_text()), digest(COMMENT_TEMPLATE.read_text())],
+        "ai": [ai_env.get("TRIAGE_AI_ENDPOINT") or config.get("ai_base_url"),
+               ai_env.get("TRIAGE_AI_MODEL"), bool(ai_env.get("AI_API_KEY"))]})
+
+
+def submission_guidance(repository, missing, status="needs-information"):
+    if status == "maintainer-reviewed":
+        return "**Maintainer confirmation recorded.** Further information requests are managed by maintainers."
+    if status == "needs-review":
+        return ("**Maintainer review needed.** The author's update or conflicting answers need review. "
+                "A maintainer should assess the information before requesting further changes.")
     if not missing:
         return ("**Submission check passed.** Thank you for providing the required information. "
                 "A maintainer still needs to review the report.")
@@ -663,8 +865,7 @@ def submission_guidance(repository, missing):
             "keep the information in this issue.\n\n"
             "Copy the missing fields below and replace every TODO with your answer:\n\n```text\n" +
             "\n".join(field + ": TODO" for field in fields) + "\n```\n\n"
-            "After an author edit or comment, an apply run updates this same bot comment and clears "
-            "the bot's information-request label once the required information is present.")
+            "Your update will be checked again in this issue. This comment is updated in place.")
 
 
 def search_queries(repository, issue, text):
@@ -774,10 +975,54 @@ def read_state(comment):
                                    and all(isinstance(v, str) for v in pending[k]) for k in pending)):
                     return empty
                 result["pending"] = pending
+            if "review_status" in state:
+                if state["review_status"] not in {"needs-information", "needs-review", "complete", "maintainer-reviewed"}:
+                    return empty
+                result["review_status"] = state["review_status"]
+            if "input_sha256" in state:
+                if not isinstance(state["input_sha256"], str) or not re.fullmatch(r"[0-9a-f]{64}", state["input_sha256"]):
+                    return empty
+                result["input_sha256"] = state["input_sha256"]
+            if "request" in state:
+                request = state["request"]
+                if (not isinstance(request, dict) or set(request) != {
+                        "latest_update_at", "latest_comment_id", "evidence_sha256", "body_sha256", "fields"}
+                        or not valid_watermark(request)
+                        or not all(isinstance(request[k], str) and re.fullmatch(r"[0-9a-f]{64}", request[k])
+                                   for k in ("evidence_sha256", "body_sha256"))
+                        or not isinstance(request["fields"], list)
+                        or not all(isinstance(v, str) and v in FIELD_PATTERNS for v in request["fields"])):
+                    return empty
+                result["request"] = request
+            if "field_sources" in state and isinstance(state["field_sources"], dict):
+                result["field_sources"] = state["field_sources"]
+            if "source_watermark" in state:
+                if not valid_watermark(state["source_watermark"]):
+                    return empty
+                result["source_watermark"] = state["source_watermark"]
+            if "field_history" in state:
+                history = state["field_history"]
+                if (not isinstance(history, dict) or len(history) > 25 or not all(
+                        isinstance(source, str) and (source == "body" or re.fullmatch(r"comment:\d+", source))
+                        and isinstance(fields, dict) and all(
+                            name in FIELD_PATTERNS and isinstance(entry, dict)
+                            and set(entry) == {"value_sha256", "updated_at"}
+                            and isinstance(entry["value_sha256"], str) and re.fullmatch(r"[0-9a-f]{64}", entry["value_sha256"])
+                            and (entry["updated_at"] is None or timestamp(entry["updated_at"]) is not None)
+                            for name, entry in fields.items()) for source, fields in history.items())):
+                    return empty
+                result["field_history"] = history
             return result
     except (ValueError, TypeError):
         pass
     return empty
+
+
+def valid_watermark(value):
+    return (isinstance(value, dict) and isinstance(value.get("latest_comment_id"), int)
+            and not isinstance(value["latest_comment_id"], bool) and value["latest_comment_id"] >= 0
+            and "latest_update_at" in value
+            and (value["latest_update_at"] is None or timestamp(value["latest_update_at"]) is not None))
 
 
 def recover_state(previous, current):
@@ -790,7 +1035,7 @@ def recover_state(previous, current):
     managed -= set(pending["remove"]) - current
     # Only additions that actually reached GitHub may be owned by this run.
     managed |= set(pending["add"]) & current
-    return {"managed": sorted(managed), "suppressed": previous["suppressed"]}
+    return dict({key: value for key, value in previous.items() if key != "pending"}, managed=sorted(managed))
 
 
 def state_marker(state):
@@ -798,12 +1043,12 @@ def state_marker(state):
     return "<!-- triage-state:" + encoded + " -->"
 
 
-def label_plan(issue, suggestions, previous, missing=None):
+def label_plan(issue, suggestions, previous, missing=None, review_status=None, blocked_groups=()):
     current = label_names(issue)
     # Stored state can never grant the bot ownership of a maintainer-only label.
     def bot_owned(name):
         return name.startswith(("type/", "area/", "ai-model/")) or name in (
-            "needs-triage", "triage/needs-information")
+            "needs-triage", "triage/needs-information", "triage/needs-review")
 
     managed = {n for n in previous["managed"] if bot_owned(n)}
     # The waiting stage is workflow-owned, including labels added by a template.
@@ -813,7 +1058,9 @@ def label_plan(issue, suggestions, previous, missing=None):
     manual = current - managed
     desired = set()
     for prefix in ("type/", "area/", "ai-model/"):
-        if not any(n.startswith(prefix) for n in manual):
+        if prefix in blocked_groups:
+            desired.update(n for n in managed & current if n.startswith(prefix))
+        elif not any(n.startswith(prefix) for n in manual):
             desired.update(s["label"] for s in suggestions if s["label"].startswith(prefix))
     # A removed managed label freezes its group until reset, preserving corrections.
     for prefix in ("type/", "area/", "ai-model/"):
@@ -822,8 +1069,10 @@ def label_plan(issue, suggestions, previous, missing=None):
     if ("triage/accepted" not in current and issue.get("state") == "open"
             and not any(n.startswith("resolution/") for n in current)):
         desired.add("needs-triage")
-    if missing:
+    if missing and review_status in (None, "needs-information"):
         desired.add("triage/needs-information")
+    if review_status == "needs-review":
+        desired.add("triage/needs-review")
     desired -= suppressed
     add = desired - current
     remove = (managed & current) - desired
@@ -854,7 +1103,7 @@ def render_comment(repository, suggestions, similar, plan, details, ai_status, n
     for label, prefix in [("Type", "type/"), ("Area", "area/"), ("Reported AI model", "ai-model/")]:
         rows.append(f"| {label} | {show_labels(n for n in effective if n.startswith(prefix))} | "
                     f"{show_labels(s['label'] for s in suggestions if s['label'].startswith(prefix))} |")
-    stage = effective & {"needs-triage", "triage/accepted"}
+    stage = effective & {"needs-triage", "triage/accepted", "triage/needs-information", "triage/needs-review"}
     rows.append(f"| Triage stage | {show_labels(stage)} | Maintainer acceptance required |")
     sources = {"rule": "rule", "form": "form", "reporter": "reporter declaration", "ai": "AI suggestion"}
     evidence = [f"- {show_label(s['label'])} ({safe_text(sources.get(s['source'], s['source']))}): {safe_text(s['evidence'])}"
@@ -867,12 +1116,24 @@ def render_comment(repository, suggestions, similar, plan, details, ai_status, n
                              f"({safe_text(item['state'])}; {relation}; text similarity {item['score']:.3f})")
         similar_lines.append("  " + safe_text(item["reason"]))
     if not similar:
-        similar_lines.append("- No candidate met the threshold in this search. Related or duplicate issues may still exist.")
+        similar_lines.append("- Similarity search was deferred while this author update awaits maintainer review."
+                             if details.get("analysis_deferred") else
+                             "- No candidate met the threshold in this search. Related or duplicate issues may still exist.")
+    status = details.get("review_status", "needs-information" if details["missing"] else "complete")
+    status_text = {"needs-information": "More information needed", "needs-review": "Author update needs maintainer review",
+                   "complete": "Required-field checks passed; maintainer review is still needed",
+                   "maintainer-reviewed": "Maintainer confirmation takes precedence"}
+    checklist = "\n".join("- [ ] " + safe_text(m) + ": " + submission_field(m)[1] for m in details["missing"])
+    if status in {"needs-review", "maintainer-reviewed"}:
+        checklist = "\n".join("- Not confirmed automatically: " + safe_text(m) for m in details["missing"])
     context = {
         "marker": MARKER,
         "classification": "\n".join(rows),
         "evidence": "\n".join(evidence) or "- Not enough evidence to classify; maintainer triage is needed.",
-        "information_status": "More information needed" if details["missing"] else "Required-field checks passed; maintainer review is still needed",
+        "information_status": status_text[status],
+        "information_heading": ("Information for maintainer review:" if status == "needs-review" else
+                                "Automatic checks retained for reference:" if status == "maintainer-reviewed" else
+                                "Information to provide or verify:"),
         "versions": safe_text(", ".join(details["versions"]) or "Not identified"),
         "platforms": safe_text(", ".join(details["platforms"]) or "Not identified"),
         "reported_models": safe_text(", ".join(m["name"] for m in details["reported_models"]) or "Missing or incomplete declaration"),
@@ -881,9 +1142,8 @@ def render_comment(repository, suggestions, similar, plan, details, ai_status, n
         "compatible_mode": safe_text(details.get("compatible_mode") or "Not identified"),
         "server_encoding": safe_text(details.get("server_encoding") or "Not identified"),
         "errors": safe_text("; ".join(details["errors"]) or "Not identified"),
-        "missing": "\n".join("- [ ] " + safe_text(m) + ": " + submission_field(m)[1]
-                             for m in details["missing"]) or "- No missing required information identified.",
-        "submission_guidance": submission_guidance(repository, details["missing"]),
+        "missing": checklist or "- No missing required information identified.",
+        "submission_guidance": submission_guidance(repository, details["missing"], status),
         "similar": "\n".join(similar_lines),
         "add_labels": show_labels(plan["add"]),
         "remove_labels": show_labels(plan["remove"]),
@@ -894,12 +1154,7 @@ def render_comment(repository, suggestions, similar, plan, details, ai_status, n
     return Template(COMMENT_TEMPLATE.read_text(encoding="utf-8")).substitute(context).rstrip()
 
 
-def unchanged(before, after):
-    keys = ("number", "title", "body", "state", "updated_at")
-    return all(before.get(k) == after.get(k) for k in keys) and label_names(before) == label_names(after)
-
-
-def analyze(github, number, config, apply=False, ai_env=None, target_kind="issue"):
+def analyze(github, number, config, apply=False, ai_env=None, target_kind="issue", automatic=False):
     if target_kind not in ("issue", "any"):
         raise ValueError("Unknown target kind")
     try:
@@ -915,16 +1170,31 @@ def analyze(github, number, config, apply=False, ai_env=None, target_kind="issue
         return {"issue": number, "kind": kind, "skipped": "Closed issue or triage/skip label"}
     comments = github.comments(number)
     old_comment = bot_comment(comments)
-    previous = recover_state(read_state(old_comment), label_names(issue))
+    saved = read_state(old_comment)
+    previous = recover_state(saved, label_names(issue))
+    ai_env = ai_env or {}
+    snapshot = input_fingerprint(issue, comments, config, ai_env)
+    if automatic and "pending" not in saved and saved.get("input_sha256") == snapshot:
+        return {"issue": number, "kind": kind, "skipped": "Author evidence and policy are unchanged; analysis reused"}
     text = reporter_text(issue, comments)
-    declared_type = submission_answer(submission_sources(issue, comments), r"Issue[ \t]+type|问题类型")
+    records = report_records(issue, comments, previous.get("request", {}).get("fields", []))
+    declared_type = resolve_fields(records, previous)[0].get("Issue type", "").strip().strip("`").casefold()
     classification_text = text + "\n\nIssue type: " + declared_type if declared_type else text
     suggestions = classify(issue, classification_text, config)
-    history, capped = github.history(config["history_limit"])
+    manual_types = [n for n in label_names(issue) if n.startswith("type/") and n not in previous["managed"]]
+
+    def with_manual_types(items):
+        return ([s for s in items if not s["label"].startswith("type/")] + [{"label": n} for n in manual_types]
+                if manual_types else items)
+
+    preliminary = check_submission(issue, comments, with_manual_types(suggestions), config, previous)
+    defer_analysis = (automatic and previous.get("review_status") in {"needs-information", "needs-review"}
+                      and review_state(issue, comments, preliminary, previous)["review_status"] == "needs-review")
+    history, capped = ([], False) if defer_analysis else github.history(config["history_limit"])
     notes = []
     if capped:
         notes.append(f"Recent-history scan reached {config['history_limit']} records (including PRs); keyword searches supplement this scan.")
-    for query in search_queries(github.repository, issue, text):
+    for query in ([] if defer_analysis else search_queries(github.repository, issue, text)):
         try:
             response = github.search(query)
             history.extend(response["items"])
@@ -933,13 +1203,14 @@ def analyze(github, number, config, apply=False, ai_env=None, target_kind="issue
         except RuntimeError:
             notes.append("Keyword search is unavailable; similarity detection uses the history retrieved so far.")
             break
-    ai_env = ai_env or {}
     settings = [ai_env.get("TRIAGE_AI_ENDPOINT") or config.get("ai_base_url", ""),
                 ai_env.get("TRIAGE_AI_MODEL"), ai_env.get("AI_API_KEY")]
     candidates = rank_similar(issue, text, history, config, include_weak=all(settings))
     ai_status = "Not enabled; using rules and Chinese/English text similarity."
+    if defer_analysis:
+        ai_status = "Deferred; the author update is awaiting maintainer review."
     ai_matches = set()
-    if any(settings[1:]):
+    if any(settings[1:]) and not defer_analysis:
         if not all(settings):
             ai_status = "Incomplete configuration; falling back to rules and text similarity."
         else:
@@ -960,15 +1231,24 @@ def analyze(github, number, config, apply=False, ai_env=None, target_kind="issue
     visible = [c for c in candidates if c["number"] in ai_matches or (
         c["score"] >= config["similarity_threshold"] and c["shared_terms"] >= 2)]
     similar = sorted(visible, key=lambda c: (c["relationship"] != "possible-duplicate", -c["score"]))[:config["max_similar"]]
-    manual_types = [n for n in label_names(issue) if n.startswith("type/") and n not in previous["managed"]]
-    detail_suggestions = suggestions
-    if manual_types:
-        detail_suggestions = [s for s in suggestions if not s["label"].startswith("type/")]
-        detail_suggestions += [{"label": n} for n in manual_types]
-    details = check_submission(issue, comments, detail_suggestions, config)
+    details = preliminary if defer_analysis else check_submission(issue, comments, with_manual_types(suggestions), config, previous)
+    details["analysis_deferred"] = defer_analysis
+    review = review_state(issue, comments, details, previous)
+    details["review_status"] = review["review_status"]
+    if details["conflicts"]:
+        notes.append("Conflicting answers have uncertain edit order; maintainer review is needed for: " + ", ".join(details["conflicts"]))
     suggestions.extend({"label": model["label"], "evidence": model["evidence"], "source": "reporter"}
                        for model in details["reported_models"])
-    plan = label_plan(issue, suggestions, previous, details["missing"])
+    blocked = {prefix for name, prefix in (("Issue type", "type/"), ("AI model", "ai-model/"))
+               if name in details["conflicts"]}
+    if defer_analysis:
+        blocked.update({"type/", "area/"})
+    suggestions = [s for s in suggestions if not any(s["label"].startswith(prefix) for prefix in blocked)]
+    plan = label_plan(issue, suggestions, previous, details["missing"], review["review_status"], blocked)
+    expected_labels = (label_names(issue) | set(plan["add"])) - set(plan["remove"])
+    expected_fingerprint = input_fingerprint(issue, comments, config, ai_env, expected_labels)
+    plan["state"].update(review, field_sources=details["field_sources"], field_history=details["field_history"],
+                         source_watermark=source_watermark(records), input_sha256=expected_fingerprint)
     body = render_comment(github.repository, suggestions, similar, plan, details, ai_status,
                           list(dict.fromkeys(notes)), label_names(issue))
     result = {"issue": number, "kind": kind, "mode": "apply" if apply else "preview",
@@ -976,7 +1256,9 @@ def analyze(github, number, config, apply=False, ai_env=None, target_kind="issue
               "details": details, "comment": body}
     if apply:
         # Do not apply a stale decision after a human update during analysis.
-        if not unchanged(issue, github.issue(number)) or comments != github.comments(number):
+        current_issue, current_comments = github.issue(number), github.comments(number)
+        if (input_fingerprint(current_issue, current_comments, config, ai_env) != snapshot
+                or bot_comment(current_comments) != old_comment):
             raise RuntimeError("Issue changed during analysis; rerun triage")
         # Persist ownership intent before changing issue labels. A later run can
         # recover even when a request succeeded but its response was lost.
@@ -988,11 +1270,15 @@ def analyze(github, number, config, apply=False, ai_env=None, target_kind="issue
                 github.call(f"{github.root}/issues/comments/{old_comment['id']}", "PATCH", {"body": pending_body})
             else:
                 old_comment = github.call(f"{github.root}/issues/{number}/comments", "POST", {"body": pending_body})
+            if input_fingerprint(github.issue(number), github.comments(number), config, ai_env) != snapshot:
+                raise RuntimeError("Issue changed before label writes; rerun triage to recover")
             github.ensure_labels(config, plan["add"])
         if plan["add"]:
             github.call(f"{github.root}/issues/{number}/labels", "POST", {"labels": plan["add"]})
         for name in plan["remove"]:
             github.call(f"{github.root}/issues/{number}/labels/" + quote(name, safe=""), "DELETE")
+        if input_fingerprint(github.issue(number), github.comments(number), config, ai_env) != expected_fingerprint:
+            raise RuntimeError("Issue changed before comment finalization; rerun triage to recover")
         if old_comment:
             if plan["add"] or plan["remove"] or old_comment["body"] != body:
                 github.call(f"{github.root}/issues/comments/{old_comment['id']}", "PATCH", {"body": body})
@@ -1001,12 +1287,12 @@ def analyze(github, number, config, apply=False, ai_env=None, target_kind="issue
     return result
 
 
-def run_targets(github, targets, config, apply=False, ai_env=None):
+def run_targets(github, targets, config, apply=False, ai_env=None, automatic=False):
     results = []
     counts = {"processed": 0, "skipped": 0, "failed": 0}
     for target in targets:
         try:
-            result = analyze(github, target["number"], config, apply, ai_env, target["kind"])
+            result = analyze(github, target["number"], config, apply, ai_env, target["kind"], automatic)
             status = "skipped" if "skipped" in result else "processed"
         except (RuntimeError, ValueError, KeyError) as error:
             result = {"issue": target["number"], "kind": target["kind"], "error": str(error)}
@@ -1117,7 +1403,8 @@ def main():
     else:
         # Never send fixture contents to an external model.
         ai_env = {} if args.fixture else resolve_ai_env(config, os.environ, event, dispatch)
-        report = run_targets(github, targets, config, apply, ai_env)
+        automatic = bool(os.environ.get("GITHUB_EVENT_NAME")) and not dispatch and not args.fixture
+        report = run_targets(github, targets, config, apply, ai_env, automatic)
         result = report["results"][0] if len(targets) == 1 else report
     print(json.dumps(result, ensure_ascii=False, indent=2))
     if os.environ.get("GITHUB_STEP_SUMMARY"):

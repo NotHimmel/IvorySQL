@@ -48,16 +48,17 @@ class StatusTests(unittest.TestCase):
         self.assertIn("needs-triage", plan["add"])
         self.assertNotIn("needs-triage", plan["state"]["suppressed"])
 
-    def test_acceptance_keeps_bot_information_requests_until_fields_are_supplied(self):
-        github = FakeGitHub(issue(body="The server crashes.", labels=["needs-triage", "triage/accepted"]))
+    def test_acceptance_clears_bot_requests_and_stops_automatic_nagging(self):
+        github = FakeGitHub(issue(body="The server crashes.", labels=["needs-triage"]))
         triage.analyze(github, 20, self.config, apply=True)
-        self.assertNotIn("needs-triage", github.current["labels"])
         self.assertIn("triage/needs-information", github.current["labels"])
-        github.current["body"] = ("IvorySQL master\n1. Start the server.\nAI model: not used\n"
-                                  "Expected behavior: The server starts successfully.\nCompatible mode: pg\nServer encoding: UTF8")
-        triage.analyze(github, 20, self.config, apply=True)
+        github.current["labels"].append("triage/accepted")
+        result = triage.analyze(github, 20, self.config, apply=True)
         self.assertNotIn("triage/needs-information", github.current["labels"])
+        self.assertNotIn("needs-triage", github.current["labels"])
         self.assertIn("triage/accepted", github.current["labels"])
+        self.assertEqual(result["details"]["review_status"], "maintainer-reviewed")
+        self.assertNotIn("Action required from the issue author", result["comment"])
 
     def test_manual_information_request_is_preserved_after_acceptance(self):
         github = FakeGitHub(issue(body="IvorySQL master\n1. Start the server.\nAI model: not used\n"

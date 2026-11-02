@@ -26,7 +26,7 @@ Check result: $information_status
 | Server encoding | $server_encoding |
 | Key errors | $errors |
 
-Information to provide or verify:
+$information_heading
 
 $missing
 
@@ -46,7 +46,6 @@ $similar
 - Analysis method: $ai_status
 $notes
 
-Declare the model name/version in the `AI model` field or an author comment. Separate multiple models with commas or newlines; explicitly write `not used` if no AI was used.
 Maintainers can use `triage/accepted` after triage, or `resolution/duplicate` after confirming and linking the original issue. Maintainers review all triage conclusions.
 
 $state

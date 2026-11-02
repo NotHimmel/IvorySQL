@@ -23,13 +23,17 @@ thresholds, and limits:
   On the next triage run, acceptance (`triage/accepted`) or any `resolution/*`
   label removes it. Removing acceptance and resolution restores it for open
   issues on the next run. Automated classification does not imply acceptance.
-- Information: `triage/needs-information` can coexist with acceptance. Missing model
+- Information: bot-owned `triage/needs-information` asks the author for specific
+  missing details. Maintainer acceptance or resolution clears automated requests;
+  manually applied information-request labels remain for maintainers. Missing model
   declarations, unknown issue types, empty descriptions, and incomplete bug reports
   produce a specific checklist. Releases, `master`/`main`,
   PostgreSQL stable branches, and explicit commit IDs count as version information.
   Reproduction fields can contain prose; SQL, shell commands, and numbered steps
   are also accepted clues. Environment scaffolding and log sections are excluded.
   These checks do not prove that reproduction succeeds.
+- Review: `triage/needs-review` routes an author response or uncertain source
+  conflict to maintainers. It does not mean the report is complete or accepted.
 - Resolutions: `resolution/duplicate`, `resolution/invalid`, `resolution/wontfix` are
   maintainer decisions. Confirmed duplicates should link to their original issue.
 - `triage/skip` is manually applied by maintainers to exclude an issue from all
@@ -81,15 +85,34 @@ Server encoding: UTF8
 AI model: not used
 ```
 
-The next apply run shrinks the checklist or replaces it with a passed check, and
-clears the bot-owned information-request label when all required information is
-present. Manual information-request labels remain for maintainers. Edited or
-deleted supplements are reevaluated; supplements are not lost after five later
-comments. Comments from other users or bots do not satisfy reporter requirements.
-The most recently updated author comment with an explicit answer takes precedence
-over older answers for expected behavior and runtime settings.
+The next apply run follows these transitions:
 
-These checks run locally without relying on the model's opinion. They do not
+| Situation | Automatic result |
+| --- | --- |
+| First incomplete report, or a structured supplement that still leaves clear gaps | Update the missing-field checklist and use `triage/needs-information` |
+| The author responds in prose and the checks cannot confirm completeness | Replace the author request with a maintainer-review message and use `triage/needs-review` |
+| Conflicting answers cannot be ordered reliably | Request maintainer review; preserve existing labels in the conflicting type/model group |
+| Required information is present without unresolved conflicts | Clear bot-owned information/review labels and report that field checks passed |
+| A maintainer applies `triage/accepted` or a `resolution/*` label | Clear automated requests and let maintainers manage further questions |
+
+Manual information/review labels remain for maintainers. Review is retained across
+ordinary replies instead of repeatedly asking the author to rewrite information.
+Structured corrections can refresh the remaining checklist; a complete supplement
+clears the bot-owned review label. Removing acceptance and
+resolution allows a new automatic information-request round on the next run.
+Edited or deleted supplements are reevaluated; supplements are not lost after five
+later comments. Comments from other users or bots do not satisfy reporter requirements.
+
+Filled field-only replies are accepted inside a text/Markdown code block when they
+contain at least two recognized fields, or a single field the bot has requested.
+Blocks containing log lines, code, or unrelated text stay fenced and do not become
+declarations. Version numbers followed by sentence punctuation are recognized.
+Common prose such as "I expected ...", "in pg compatibility mode", and "UTF8
+encoding" is recognized. When the bug form selects `Other` for encoding, one
+unambiguous encoding in its additional-information section is accepted.
+
+Required-field and lifecycle decisions run locally. Optional model classification
+can supply the inferred issue type or area when rules abstain. These checks do not
 verify reproduction, accept the issue, or close it. Repeated runs reuse one bot
 comment. Automatic reminders require `AUTO_APPLY=true`; otherwise events produce
 previews and a manual `apply` run is needed to publish the guidance.
@@ -116,11 +139,12 @@ org/model-a-v2, model-b-v1
 AI model: not used
 ```
 
-A reporter comment can supply or correct this field. The most recently updated
-reporter comment containing a declaration takes precedence; otherwise the issue
-body is used. Ordinary subsequent comments do not erase a prior declaration.
-Quoted text, code blocks, hidden comments, other users, and bot configuration do
-not supply the reporter's model. Chinese field names and declarations are accepted;
+A reporter comment or body edit can supply or correct this field. The field-source
+rules below determine which declaration is current. Ordinary subsequent comments
+do not erase a prior declaration. Quoted text, arbitrary code blocks, hidden
+comments, other users, and bot configuration do not supply the reporter's model.
+The field-only reply exception above also applies to this field.
+Chinese field names and declarations are accepted;
 bot-generated headings, explanations, and instructions are in English. Quoted
 reporter evidence retains its original language.
 
@@ -138,6 +162,27 @@ created on apply; `sync-labels` only creates the fixed configured labels.
 Model metadata is excluded from database-version extraction, area rules, and
 text similarity. The bot clears its own information request when all required
 fields have been supplied; manual information requests remain for maintainers.
+
+## Field sources and edit times
+
+Each explicit field records its source (`body` or a comment ID), answer hash, and
+edit time. The first observation uses source edit times as its baseline; historical
+field-level edits before that observation cannot be reconstructed. The latest
+changed answer wins after that baseline. Editing a different paragraph does not
+reassert every unchanged answer from that body/comment: saved field history keeps
+the earlier field time. History retains the body declaration, the two newest
+comment declarations, and one unresolved declaration per field, bounding saved metadata. An edited old comment
+outside that retained history is treated conservatively if its field order cannot
+be established.
+
+REST issue `updated_at` also changes on comments and labels. The reader therefore
+uses a read-only GraphQL query for the body's `lastEditedAt`/`createdAt`, verifying
+that the GraphQL and REST body snapshots agree. If this lookup fails or edit times
+tie, conflicting declarations route to maintainer review. The bot does not guess
+which answer is newer or change type/model labels based on an unresolved conflict.
+Only hashes and source metadata are saved in the trusted bot comment, without
+copying complete discussions or API keys into its hidden state. Existing comments
+without this metadata continue to work and gain it on the next apply run.
 
 ## Fixed bot comment
 
@@ -174,6 +219,28 @@ cannot distinguish an interrupted bot addition from a human adding the exact sam
 label during the interruption, or an unfinished addition from a later human removal.
 Human replacement labels and unrelated labels remain protected. Keep the pending
 comment until recovery completes so that ownership evidence is not lost.
+
+## Repeated events and stale results
+
+Automatic jobs wait 15 seconds before reading the current issue so rapid author
+edits can settle. Writes for one issue remain serialized. The saved input hash
+includes title/body, author supplements, labels, policy/configuration, comment
+template, and model settings. When these match a successfully published result,
+an automatic event skips history scans, search, model calls, and writes. A pending
+writeback record always bypasses this shortcut. Manual runs always analyze afresh,
+which can refresh similar-issue results even without an author content change.
+Preview never stores a new hash or modifies a pending record.
+
+An automatic plain response to an outstanding information request can be routed
+to maintainer review using local checks. That path defers history/search/model
+analysis and preserves existing type/area labels. A manual run still performs the
+full analysis.
+
+Before publishing the pending record, before changing labels, and before finalizing
+the comment, the script checks the current evidence against the analyzed snapshot
+or expected resulting labels. A stale decision is rejected. Changes after journal
+publication leave that journal available for recovery. These checks are best
+effort: GitHub does not offer an atomic compare-and-write operation for this flow.
 
 ## Deployment and manual ranges
 
