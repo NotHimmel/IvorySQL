@@ -42,7 +42,8 @@ thresholds, and limits:
 
 Manual classification labels take precedence. Except for the workflow-managed
 `needs-triage` stage, the bot removes only labels it added and recorded in its
-comment. A manually set information-request label is also retained. Removing a
+comment, plus redundant legacy type assignments after confirming their canonical
+replacement. A manually set information-request label is also retained. Removing a
 bot-managed type, area, or model label freezes automation for that group. To reset
 ownership, delete the bot comment and rerun; existing labels remain manual labels.
 Only the dedicated comment authored by `github-actions[bot]` supplies ownership
@@ -50,6 +51,13 @@ state. Missing, malformed, or copied user-authored state cannot claim ownership.
 
 Adding or removing labels does not trigger a run. Use a manual `apply` run to
 reconcile stage labels immediately, or wait for the next supported event.
+
+Templates use only `type/bug`, `type/feature`, or `type/enhancement`. When an issue
+still carries a legacy type label, apply adds or confirms its canonical replacement
+before removing the redundant assignment. Legacy `enhancement` is also redundant
+when an explicit `type/feature` exists, matching older feature templates. Conflicting
+type assignments are left for maintainers. The normalized label retains the manual
+priority of the original classification, including after an interrupted writeback.
 
 ## Guiding incomplete submissions
 

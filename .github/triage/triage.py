@@ -26,6 +26,8 @@ MODEL_FIELD = r"(?:AI[ \t_-]*models?|(?:使用的[ \t]*)?(?:AI[ \t]*)?模型(?:�
 MARKER = "<!-- ivorysql-issue-triage:v1 -->"
 STATE_RE = re.compile(r"<!-- triage-state:([A-Za-z0-9+/=]+) -->")
 BOT = "github-actions[bot]"
+LEGACY_TYPE_LABELS = {"bug": "type/bug", "feature": "type/feature", "feature-request": "type/feature",
+                      "enhancement": "type/enhancement"}
 STOP = set("a an the and or of to in for with is are was were be been this that "
            "it on as at by from not issue bug feature enhancement request "
            "postgresql postgres database version expected actual behavior "
@@ -949,9 +951,12 @@ def read_state(comment):
             result = {k: state[k] for k in empty}
             pending = state.get("pending")
             if pending is not None:
-                if (not isinstance(pending, dict) or set(pending) != {"add", "remove"}
+                if (not isinstance(pending, dict) or not {"add", "remove"} <= set(pending)
+                        or set(pending) - {"add", "remove", "manual_types"}
                         or not all(isinstance(pending[k], list)
                                    and all(isinstance(v, str) for v in pending[k]) for k in pending)):
+                    return empty
+                if any(name not in set(LEGACY_TYPE_LABELS.values()) for name in pending.get("manual_types", [])):
                     return empty
                 result["pending"] = pending
             if "review_status" in state:
@@ -1014,6 +1019,7 @@ def recover_state(previous, current):
     managed -= set(pending["remove"]) - current
     # Only additions that actually reached GitHub may be owned by this run.
     managed |= set(pending["add"]) & current
+    managed -= set(pending.get("manual_types", [])) & current
     return dict({key: value for key, value in previous.items() if key != "pending"}, managed=sorted(managed))
 
 
@@ -1055,9 +1061,22 @@ def label_plan(issue, suggestions, previous, missing=None, review_status=None, b
     desired -= suppressed
     add = desired - current
     remove = (managed & current) - desired
+    effective_types = {name for name in (current | add) - remove if name.startswith("type/")}
+    normalized_manual_types = set()
+    if len(effective_types) == 1 and "type/" not in blocked_groups:
+        canonical = next(iter(effective_types))
+        for name in current:
+            legacy = name.casefold()
+            # Older feature templates also used the broad enhancement label.
+            if (LEGACY_TYPE_LABELS.get(legacy) == canonical
+                    or (legacy == "enhancement" and canonical == "type/feature")):
+                remove.add(name)
+                normalized_manual_types.add(canonical)
     state = {"managed": sorted(((managed & current) | add) - remove),
              "suppressed": sorted(suppressed)}
-    return {"add": sorted(add), "remove": sorted(remove), "state": state}
+    state["managed"] = sorted(set(state["managed"]) - normalized_manual_types)
+    return {"add": sorted(add), "remove": sorted(remove), "state": state,
+            "manual_types": sorted(normalized_manual_types)}
 
 
 def safe_text(value):
@@ -1126,9 +1145,7 @@ def analyze(github, number, config, apply=False, ai_env=None, target_kind="issue
     suggestions = classify(issue, classification_text, config)
     manual_types = [n for n in label_names(issue) if n.startswith("type/") and n not in previous["managed"]]
     if not manual_types:
-        aliases = {"bug": "type/bug", "feature": "type/feature", "feature-request": "type/feature",
-                   "enhancement": "type/enhancement"}
-        legacy_types = {aliases[name.casefold()] for name in label_names(issue) if name.casefold() in aliases}
+        legacy_types = {LEGACY_TYPE_LABELS[name.casefold()] for name in label_names(issue) if name.casefold() in LEGACY_TYPE_LABELS}
         if len(legacy_types) == 1:
             manual_types = sorted(legacy_types)
 
@@ -1225,6 +1242,8 @@ def analyze(github, number, config, apply=False, ai_env=None, target_kind="issue
         # Persist ownership intent before changing issue labels. A later run can
         # recover even when a request succeeded but its response was lost.
         journal = dict(previous, pending={"add": plan["add"], "remove": plan["remove"]})
+        if plan["manual_types"]:
+            journal["pending"]["manual_types"] = plan["manual_types"]
         pending_body = body.replace(state_marker(plan["state"]), state_marker(journal))
         if plan["add"] or plan["remove"]:
             if old_comment:

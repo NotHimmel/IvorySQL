@@ -4,6 +4,7 @@ from unittest.mock import patch
 import triage
 from test_submissions import COMPLETE_BUG
 from test_triage import FakeGitHub, issue
+from test_recovery import FailingGitHub
 
 
 class ClassificationTests(unittest.TestCase):
@@ -68,6 +69,66 @@ class ClassificationTests(unittest.TestCase):
         with patch("triage.ask_ai", return_value=([], {})):
             result = triage.analyze(FakeGitHub(issue(body=COMPLETE_BUG)), 20, self.config, ai_env=self.ai_env)
         self.assertIn("type/bug", result["labels"]["add"])
+
+    def test_legacy_bug_is_replaced_and_its_manual_priority_is_preserved(self):
+        github = FakeGitHub(issue(body=COMPLETE_BUG, labels=["bug"]))
+        triage.analyze(github, 20, self.config, apply=True)
+        self.assertIn("type/bug", github.current["labels"])
+        self.assertNotIn("bug", github.current["labels"])
+        state = triage.read_state(triage.bot_comment(github.thread))
+        self.assertNotIn("type/bug", state["managed"])
+        add = next(index for index, (path, method, _) in enumerate(github.writes) if path.endswith("/labels") and method == "POST")
+        remove = next(index for index, (path, method, _) in enumerate(github.writes) if path.endswith("/labels/bug") and method == "DELETE")
+        self.assertLess(add, remove)
+        with patch("triage.ask_ai", return_value=([{"label": "type/feature", "source": "ai", "evidence": "subscription"}], {})):
+            triage.analyze(github, 20, self.config, apply=True, ai_env=self.ai_env)
+        self.assertIn("type/bug", github.current["labels"])
+        self.assertNotIn("type/feature", github.current["labels"])
+
+    def test_existing_duplicate_legacy_label_is_removed_without_readding_the_type(self):
+        github = FakeGitHub(issue(body=COMPLETE_BUG, labels=["bug", "type/bug"]))
+        result = triage.analyze(github, 20, self.config, apply=True)
+        self.assertIn("bug", result["labels"]["remove"])
+        self.assertNotIn("type/bug", result["labels"]["add"])
+        self.assertIn("type/bug", github.current["labels"])
+        self.assertNotIn("bug", github.current["labels"])
+
+    def test_old_feature_template_enhancement_label_is_redundant(self):
+        github = FakeGitHub(issue(title="Please investigate", body="Description: Add a capability.\nAI model: not used",
+                                  labels=["enhancement", "type/feature"]))
+        triage.analyze(github, 20, self.config, apply=True)
+        self.assertEqual({name for name in github.current["labels"] if name in {"enhancement", "type/feature", "type/enhancement"}},
+                         {"type/feature"})
+
+    def test_conflicting_legacy_label_is_left_for_maintainers(self):
+        current = issue(labels=["bug", "type/feature"])
+        plan = triage.label_plan(current, [], {"managed": [], "suppressed": []})
+        self.assertNotIn("bug", plan["remove"])
+
+    def test_failed_replacement_addition_keeps_the_legacy_label(self):
+        github = FailingGitHub(issue(body=COMPLETE_BUG, labels=["bug"]))
+        github.fail_when = lambda path, method, data: path.endswith("/labels") and method == "POST"
+        with self.assertRaises(triage.APIError):
+            triage.analyze(github, 20, self.config, apply=True)
+        self.assertIn("bug", github.current["labels"])
+        self.assertNotIn("type/bug", github.current["labels"])
+        triage.analyze(github, 20, self.config, apply=True)
+        self.assertNotIn("bug", github.current["labels"])
+        self.assertNotIn("type/bug", triage.read_state(triage.bot_comment(github.thread))["managed"])
+
+    def test_interrupted_legacy_removal_preserves_manual_priority_on_recovery(self):
+        github = FailingGitHub(issue(body=COMPLETE_BUG, labels=["bug"]))
+        github.fail_when = lambda path, method, data: method == "DELETE" and path.endswith("/labels/bug")
+        github.fail_after = True
+        with self.assertRaises(triage.APIError):
+            triage.analyze(github, 20, self.config, apply=True)
+        self.assertNotIn("bug", github.current["labels"])
+        self.assertEqual(triage.read_state(triage.bot_comment(github.thread))["pending"]["manual_types"], ["type/bug"])
+        with patch("triage.ask_ai", return_value=([{"label": "type/feature", "source": "ai", "evidence": "subscription"}], {})):
+            triage.analyze(github, 20, self.config, apply=True, ai_env=self.ai_env)
+        self.assertIn("type/bug", github.current["labels"])
+        self.assertNotIn("type/feature", github.current["labels"])
+        self.assertNotIn("type/bug", triage.read_state(triage.bot_comment(github.thread))["managed"])
 
 
 if __name__ == "__main__":
