@@ -93,7 +93,7 @@ class RecoveryTests(unittest.TestCase):
         for after in (False, True):
             with self.subTest(after=after):
                 github = FailingGitHub()
-                github.fail_when = lambda path, method, data: method == "PATCH" and "Writeback pending" not in data["body"]
+                github.fail_when = lambda path, method, data: method == "PATCH" and "pending" not in triage.read_state({"body": data["body"]})
                 github.fail_after = after
                 with self.assertRaises(triage.APIError):
                     self.run_triage(github)
@@ -132,7 +132,7 @@ class RecoveryTests(unittest.TestCase):
 
     def test_recovery_preserves_unrelated_human_labels_and_corrections(self):
         github = FailingGitHub()
-        github.fail_when = lambda path, method, data: method == "PATCH" and "Writeback pending" not in data["body"]
+        github.fail_when = lambda path, method, data: method == "PATCH" and "pending" not in triage.read_state({"body": data["body"]})
         with self.assertRaises(triage.APIError):
             self.run_triage(github)
         github.current["labels"].remove("type/bug")
@@ -158,7 +158,7 @@ class RecoveryTests(unittest.TestCase):
         self.run_triage(github)
         labels = list(github.current["labels"])
         github.current["title"] = "Enhancement: improve psql completion"
-        github.fail_when = lambda path, method, data: method == "PATCH" and "Writeback pending" in data["body"]
+        github.fail_when = lambda path, method, data: method == "PATCH" and "pending" in triage.read_state({"body": data["body"]})
         with self.assertRaises(triage.APIError):
             self.run_triage(github)
         self.assertEqual(github.current["labels"], labels)

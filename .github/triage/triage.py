@@ -32,14 +32,14 @@ STOP = set("a an the and or of to in for with is are was were be been this that 
            "steps reproduce reproduction description information environment "
            "please thanks using use sql select error test no response ai model models used".split())
 SUBMISSION_FIELDS = {
-    "Issue type": ("Issue type", "Choose bug, feature, or enhancement."),
-    "Issue description": ("Description", "Describe the problem or requested change and include actual output when relevant."),
-    "Database version": ("Database version", "Provide SELECT version() output, a release, master/main, or a commit ID."),
-    "Reproduction steps or minimal SQL": ("Reproduction steps", "Provide reproducible instructions, commands, or minimal SQL."),
-    "Expected behavior": ("Expected behavior", "Explain what should happen; include expected output when available."),
-    "Compatible mode": ("Compatible mode", "Provide SHOW ivorysql.compatible_mode output: oracle, pg, or both; otherwise explain why it is not applicable."),
-    "Server encoding": ("Server encoding", "Provide SHOW server_encoding output; otherwise explain why it is not applicable."),
-    "AI model": ("AI model", "Give the model name/version, or explicitly state not used; a tool name alone is insufficient."),
+    "Issue type": ("Issue type", "Issue type: bug, feature, or enhancement."),
+    "Issue description": ("Description", "A description of the problem or requested change."),
+    "Database version": ("Database version", "Database version, branch, or commit ID."),
+    "Reproduction steps or minimal SQL": ("Reproduction steps", "Reproduction steps or minimal SQL/commands."),
+    "Expected behavior": ("Expected behavior", "Expected behavior or output."),
+    "Compatible mode": ("Compatible mode", "Compatible mode: oracle, pg, or both; explain if not applicable."),
+    "Server encoding": ("Server encoding", "Server encoding; explain if not applicable."),
+    "AI model": ("AI model", "AI model name/version, or explicitly state not used."),
 }
 FIELD_PATTERNS = {
     "Issue type": r"Issue[ \t]+type|问题类型",
@@ -849,25 +849,6 @@ def input_fingerprint(issue, comments, config, ai_env, labels=None):
                ai_env.get("TRIAGE_AI_MODEL"), bool(ai_env.get("AI_API_KEY"))]})
 
 
-def submission_guidance(repository, missing, status="needs-information"):
-    if status == "maintainer-reviewed":
-        return "**Maintainer confirmation recorded.** Further information requests are managed by maintainers."
-    if status == "needs-review":
-        return ("**Maintainer review needed.** The author's update or conflicting answers need review. "
-                "A maintainer should assess the information before requesting further changes.")
-    if not missing:
-        return ("**Submission check passed.** Thank you for providing the required information. "
-                "A maintainer still needs to review the report.")
-    fields = list(dict.fromkeys(submission_field(name)[0] for name in missing))
-    return ("**Action required from the issue author.** Please edit this issue or add an author comment "
-            "with the missing information listed above. Use the "
-            f"[issue templates](https://github.com/{repository}/issues/new/choose) as a reference; "
-            "keep the information in this issue.\n\n"
-            "Copy the missing fields below and replace every TODO with your answer:\n\n```text\n" +
-            "\n".join(field + ": TODO" for field in fields) + "\n```\n\n"
-            "Your update will be checked again in this issue. This comment is updated in place.")
-
-
 def search_queries(repository, issue, text):
     # Only allow tokens produced by our tokenizer, never user-provided qualifiers.
     terms = tokens(issue.get("title", "") + "\n" + text[:4000])
@@ -1090,65 +1071,29 @@ def safe_text(value):
     return re.sub(r"([\\`*_{}\[\]()#!|])", r"\\\1", value)
 
 
-def render_comment(repository, suggestions, similar, plan, details, ai_status, notes, current_labels=()):
-    def show_label(name):
-        value = name if re.fullmatch(r"[\w/.-]+", name) else safe_text(name)
-        return "`" + value + "`"
-
-    def show_labels(names):
-        return ", ".join(show_label(n) for n in sorted(names)) or "—"
-
-    effective = (set(current_labels) | set(plan["add"])) - set(plan["remove"])
-    rows = []
-    for label, prefix in [("Type", "type/"), ("Area", "area/"), ("Reported AI model", "ai-model/")]:
-        rows.append(f"| {label} | {show_labels(n for n in effective if n.startswith(prefix))} | "
-                    f"{show_labels(s['label'] for s in suggestions if s['label'].startswith(prefix))} |")
-    stage = effective & {"needs-triage", "triage/accepted", "triage/needs-information", "triage/needs-review"}
-    rows.append(f"| Triage stage | {show_labels(stage)} | Maintainer acceptance required |")
-    sources = {"rule": "rule", "form": "form", "reporter": "reporter declaration", "ai": "AI suggestion"}
-    evidence = [f"- {show_label(s['label'])} ({safe_text(sources.get(s['source'], s['source']))}): {safe_text(s['evidence'])}"
-                for s in suggestions]
+def render_comment(repository, similar, plan, details):
+    status = details.get("review_status", "needs-information" if details["missing"] else "complete")
+    information = {
+        "complete": "No missing required information detected.",
+        "needs-review": "Pending maintainer review; no further information requested for now.",
+        "maintainer-reviewed": "No additional information requested; a maintainer has reviewed this issue.",
+    }.get(status)
+    if information is None:
+        information = "Yes. Please provide:\n\n" + "\n".join(
+            "- " + submission_field(name)[1] for name in details["missing"])
     similar_lines = []
     for item in similar:
-        relation = "possible duplicate; needs maintainer confirmation" if item["relationship"] == "possible-duplicate" else "related issue"
+        relation = "possible duplicate" if item["relationship"] == "possible-duplicate" else "related issue"
         url = f"https://github.com/{repository}/issues/{item['number']}"
-        similar_lines.append(f"- [#{item['number']}]({url}) {safe_text(item['title'])} "
-                             f"({safe_text(item['state'])}; {relation}; text similarity {item['score']:.3f})")
-        similar_lines.append("  " + safe_text(item["reason"]))
+        title = item["title"][:120] + ("…" if len(item["title"]) > 120 else "")
+        similar_lines.append(f"- [#{item['number']}]({url}) {safe_text(title)} ({relation})")
     if not similar:
-        similar_lines.append("- Similarity search was deferred while this author update awaits maintainer review."
-                             if details.get("analysis_deferred") else
-                             "- No candidate met the threshold in this search. Related or duplicate issues may still exist.")
-    status = details.get("review_status", "needs-information" if details["missing"] else "complete")
-    status_text = {"needs-information": "More information needed", "needs-review": "Author update needs maintainer review",
-                   "complete": "Required-field checks passed; maintainer review is still needed",
-                   "maintainer-reviewed": "Maintainer confirmation takes precedence"}
-    checklist = "\n".join("- [ ] " + safe_text(m) + ": " + submission_field(m)[1] for m in details["missing"])
-    if status in {"needs-review", "maintainer-reviewed"}:
-        checklist = "\n".join("- Not confirmed automatically: " + safe_text(m) for m in details["missing"])
+        similar_lines.append("Not refreshed; awaiting maintainer review." if details.get("analysis_deferred")
+                             else "No similar issues found in this search.")
     context = {
         "marker": MARKER,
-        "classification": "\n".join(rows),
-        "evidence": "\n".join(evidence) or "- Not enough evidence to classify; maintainer triage is needed.",
-        "information_status": status_text[status],
-        "information_heading": ("Information for maintainer review:" if status == "needs-review" else
-                                "Automatic checks retained for reference:" if status == "maintainer-reviewed" else
-                                "Information to provide or verify:"),
-        "versions": safe_text(", ".join(details["versions"]) or "Not identified"),
-        "platforms": safe_text(", ".join(details["platforms"]) or "Not identified"),
-        "reported_models": safe_text(", ".join(m["name"] for m in details["reported_models"]) or "Missing or incomplete declaration"),
-        "reproduction": "Reproduction instructions or code found; reproduction still needs verification" if details["has_reproduction_clues"] else "Not identified",
-        "expected_behavior": safe_text(details.get("expected_behavior") or "Not identified"),
-        "compatible_mode": safe_text(details.get("compatible_mode") or "Not identified"),
-        "server_encoding": safe_text(details.get("server_encoding") or "Not identified"),
-        "errors": safe_text("; ".join(details["errors"]) or "Not identified"),
-        "missing": checklist or "- No missing required information identified.",
-        "submission_guidance": submission_guidance(repository, details["missing"], status),
+        "information": information,
         "similar": "\n".join(similar_lines),
-        "add_labels": show_labels(plan["add"]),
-        "remove_labels": show_labels(plan["remove"]),
-        "ai_status": safe_text(ai_status),
-        "notes": "\n".join("- " + safe_text(n) for n in notes) or "- No additional notes.",
         "state": state_marker(plan["state"]),
     }
     return Template(COMMENT_TEMPLATE.read_text(encoding="utf-8")).substitute(context).rstrip()
@@ -1249,11 +1194,13 @@ def analyze(github, number, config, apply=False, ai_env=None, target_kind="issue
     expected_fingerprint = input_fingerprint(issue, comments, config, ai_env, expected_labels)
     plan["state"].update(review, field_sources=details["field_sources"], field_history=details["field_history"],
                          source_watermark=source_watermark(records), input_sha256=expected_fingerprint)
-    body = render_comment(github.repository, suggestions, similar, plan, details, ai_status,
-                          list(dict.fromkeys(notes)), label_names(issue))
+    body = render_comment(github.repository, similar, plan, details)
     result = {"issue": number, "kind": kind, "mode": "apply" if apply else "preview",
               "labels": {"add": plan["add"], "remove": plan["remove"]},
-              "details": details, "comment": body}
+              "details": details, "comment": body,
+              "analysis": {"method": ai_status, "notes": list(dict.fromkeys(notes)),
+                           "classification": suggestions,
+                           "similar": [{key: value for key, value in item.items() if key != "body"} for item in similar]}}
     if apply:
         # Do not apply a stale decision after a human update during analysis.
         current_issue, current_comments = github.issue(number), github.comments(number)
@@ -1263,8 +1210,7 @@ def analyze(github, number, config, apply=False, ai_env=None, target_kind="issue
         # Persist ownership intent before changing issue labels. A later run can
         # recover even when a request succeeded but its response was lost.
         journal = dict(previous, pending={"add": plan["add"], "remove": plan["remove"]})
-        pending_body = body.replace(state_marker(plan["state"]),
-            "Writeback pending: label changes may be incomplete. Rerun triage to recover.\n\n" + state_marker(journal))
+        pending_body = body.replace(state_marker(plan["state"]), state_marker(journal))
         if plan["add"] or plan["remove"]:
             if old_comment:
                 github.call(f"{github.root}/issues/comments/{old_comment['id']}", "PATCH", {"body": pending_body})
@@ -1304,11 +1250,22 @@ def run_targets(github, targets, config, apply=False, ai_env=None, automatic=Fal
     return {"mode": "apply" if apply else "preview", "counts": counts, "results": results}
 
 
+def render_diagnostics(result):
+    if "analysis" not in result:
+        return ""
+    payload = json.dumps({"labels": result["labels"], "details": result["details"],
+                          "analysis": result["analysis"]}, ensure_ascii=False, indent=2)
+    fence = "`" * max(3, 1 + max([len(run) for run in re.findall(r"`+", payload)] or [0]))
+    return ("<details><summary>Analysis details</summary>\n\n" + fence + "json\n" + payload +
+            "\n" + fence + "\n\n</details>")
+
+
 def render_summary(repository, report):
     mode = report.get("mode", "preview")
     lines = ["## Issue triage: " + mode, ""]
     if "results" not in report:
         lines.append(report.get("comment", safe_text(json.dumps(report, ensure_ascii=False))))
+        lines.extend(["", render_diagnostics(report)])
         return "\n".join(lines) + "\n"
     counts = report["counts"]
     lines.extend([f"Processed: {counts['processed']}; skipped: {counts['skipped']}; failed: {counts['failed']}", "",
@@ -1322,7 +1279,7 @@ def render_summary(repository, report):
     for result in report["results"]:
         if "comment" in result:
             lines.extend(["", f"<details><summary>{result['kind']} #{result['issue']}</summary>",
-                          "", result["comment"], "", "</details>"])
+                          "", result["comment"], "", render_diagnostics(result), "", "</details>"])
     return "\n".join(lines) + "\n"
 
 

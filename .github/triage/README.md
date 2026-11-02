@@ -71,9 +71,9 @@ the existing bug form headings are also recognized. Placeholders such as TODO,
 _No response_, bare Other, and tool-only model names do not satisfy the checks.
 
 In `apply` mode, an incomplete report receives `triage/needs-information` and the
-same fixed bot comment includes an action request, field-specific instructions,
-a template link, and a copyable reply containing only the missing fields. Authors
-can edit the issue or supplement it in an author comment. For example:
+same fixed bot comment briefly states whether more information is needed and lists
+the missing fields. Authors can edit the issue or supplement it in an author
+comment. For example:
 
 ```text
 Description: Refreshing a subscription crashes the server.
@@ -186,14 +186,17 @@ without this metadata continue to work and gain it on the next apply run.
 
 ## Fixed bot comment
 
-[comment.md](comment.md) fixes the order and layout, including empty fields:
+[comment.md](comment.md) fixes two visible sections:
 
-1. Classification and labels: proposed result, manual labels, suggestions, evidence.
-2. Information completeness: version, platform, model, reproduction clues, expected
-   behavior, runtime settings, errors, and an actionable checklist with a reply template.
-3. Similar issues: links, relationships, scores, and reasons, or a fixed empty state.
-4. Label changes: planned additions and removal of bot-managed labels.
-5. Triage notes: analysis method, configured model, search limits, maintainer actions.
+1. Information needed: a short conclusion and only the missing fields. Review and
+   maintainer-confirmed states use one short sentence without repeating requests.
+2. Similar issues: at most three issue links and short titles, with a related or
+   possible-duplicate indication. An empty or deferred search uses one sentence.
+
+The public comment does not include classification tables, evidence dumps,
+similarity scores, model configuration, label operations, or a reply skeleton.
+Detailed analysis, labels, and diagnostics remain in the Actions result JSON and
+an expandable Analysis details block in the workflow Summary.
 
 AI supplies data rather than formatting. Untrusted content is escaped, including
 mentions, links, headings, and hidden markers. Existing bot comments are updated
@@ -207,7 +210,8 @@ The record retains previous ownership and planned additions/removals. After the
 label requests succeed, the comment is finalized with the resulting ownership.
 
 If label creation, label updates, or comment finalization fails, the run fails and
-the comment may show `Writeback pending`. Rerun the issue in `apply` mode to recover.
+the pending record remains in the hidden comment state. The public comment keeps
+the same two-section format. Rerun the issue in `apply` mode to recover.
 Recovery reads current labels, adopts only additions actually present, and treats
 completed removals as completed work rather than human suppression. It reanalyzes
 the latest report instead of replaying an outdated decision. Preview remains

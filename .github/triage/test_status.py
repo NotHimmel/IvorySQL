@@ -58,7 +58,7 @@ class StatusTests(unittest.TestCase):
         self.assertNotIn("needs-triage", github.current["labels"])
         self.assertIn("triage/accepted", github.current["labels"])
         self.assertEqual(result["details"]["review_status"], "maintainer-reviewed")
-        self.assertNotIn("Action required from the issue author", result["comment"])
+        self.assertNotIn("Yes. Please provide:", result["comment"])
 
     def test_manual_information_request_is_preserved_after_acceptance(self):
         github = FakeGitHub(issue(body="IvorySQL master\n1. Start the server.\nAI model: not used\n"

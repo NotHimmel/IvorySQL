@@ -162,7 +162,8 @@ class ModelDisclosureTests(unittest.TestCase):
         self.assertEqual(result["details"]["reported_models"], [])
         self.assertIn("triage/needs-information", result["labels"]["add"])
         self.assertNotIn("ai-model/robot-model", result["labels"]["add"])
-        self.assertIn("Configured triage model: robot-model", result["comment"])
+        self.assertIn("Configured triage model: robot-model", result["analysis"]["method"])
+        self.assertNotIn("robot-model", result["comment"])
 
     def test_model_cannot_fill_its_own_disclosure_via_ai_output(self):
         result = {"labels": [{"label": "ai-model/not-used", "confidence": 1, "evidence": "A report"}]}
@@ -188,23 +189,56 @@ class ModelDisclosureTests(unittest.TestCase):
         self.assertIn("type/enhancement", result["labels"]["add"])
         self.assertIn("ai-model/not-used", result["labels"]["add"])
 
-    def test_comment_keeps_sections_and_empty_fields(self):
+    def test_comment_contains_only_information_needed_and_similar_issues(self):
         for current in (issue(), issue(title="Unexpected behavior", body="")):
             result = triage.analyze(FakeGitHub(current), 20, self.config)
             self.assertEqual(re.findall(r"^### .*$", result["comment"], re.M), [
-                "### 1. Classification and labels", "### 2. Information completeness", "### 3. Similar issues", "### 4. Label changes", "### 5. Triage notes"])
-            for field in ("Database version", "Platform", "Reporter's declared AI model", "Reproduction clues", "Key errors"):
-                self.assertIn("| " + field + " |", result["comment"])
+                "### Information needed", "### Similar issues"])
+            for text in ("Classification", "Label changes", "Triage notes", "text similarity", "```text"):
+                self.assertNotIn(text, result["comment"])
             self.assertEqual(result["comment"].count(triage.MARKER), 1)
 
-    def test_comment_shows_manual_model_and_the_different_suggestion(self):
+    def test_manual_model_is_preserved_without_a_classification_table(self):
         result = triage.analyze(FakeGitHub(issue(labels=["ai-model/manually-verified"])), 20, self.config)
-        self.assertIn("| Reported AI model | `ai-model/manually-verified` | `ai-model/test-model-v1` |", result["comment"])
+        self.assertNotIn("ai-model/test-model-v1", result["labels"]["add"])
+        self.assertEqual(result["details"]["reported_models"][0]["label"], "ai-model/test-model-v1")
+        self.assertNotIn("| Reported AI model |", result["comment"])
 
-    def test_model_label_underscores_display_literally(self):
+    def test_model_label_underscores_are_preserved_in_label_operations(self):
         result = triage.analyze(FakeGitHub(issue(body="AI model: model_a_v2")), 20, self.config)
-        self.assertIn("`ai-model/model_a_v2`", result["comment"])
-        self.assertNotIn("`ai-model/model\\_a\\_v2`", result["comment"])
+        self.assertIn("ai-model/model_a_v2", result["labels"]["add"])
+        self.assertNotIn("ai-model/model_a_v2", result["comment"])
+
+    def test_long_similarity_reasons_and_titles_do_not_make_public_comments_verbose(self):
+        result = triage.analyze(FakeGitHub(issue(body="")), 20, self.config)
+        candidates = [{"number": number, "title": "A" * 1000, "relationship": "related",
+                       "score": 0.999, "state": "open", "reason": "INTERNAL_REASON " * 1000}
+                      for number in (1, 2, 3)]
+        plan = {"state": triage.read_state({"body": result["comment"]})}
+        body = triage.render_comment("example/postgres", candidates, plan, result["details"])
+        visible = re.sub(r"<!--.*?-->", "", body, flags=re.S)
+        self.assertLess(len(visible), 1500)
+        self.assertNotIn("INTERNAL_REASON", visible)
+        self.assertNotIn("0.999", visible)
+        self.assertEqual(visible.count("(related issue)"), 3)
+
+    def test_pending_writeback_keeps_the_same_two_section_public_comment(self):
+        github = FakeGitHub()
+        real_call = github.call
+
+        def fail_finalization(path, method="GET", data=None):
+            if method == "PATCH" and "pending" not in triage.read_state({"body": data["body"]}):
+                raise triage.APIError(503)
+            return real_call(path, method, data)
+
+        with patch.object(github, "call", side_effect=fail_finalization), self.assertRaises(triage.APIError):
+            triage.analyze(github, 20, self.config, apply=True)
+        pending = github.thread[0]["body"]
+        self.assertIn("pending", triage.read_state({"body": pending}))
+        self.assertNotIn("Writeback pending", pending)
+        triage.analyze(github, 20, self.config, apply=True)
+        self.assertEqual(re.sub(r"<!--.*?-->", "", pending, flags=re.S),
+                         re.sub(r"<!--.*?-->", "", github.thread[0]["body"], flags=re.S))
 
     def test_example_comment_matches_the_fixed_template(self):
         root = Path(triage.__file__).parent

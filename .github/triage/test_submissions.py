@@ -27,26 +27,25 @@ class SubmissionTests(unittest.TestCase):
     def analyze(self, current, comments=None, apply=False):
         return triage.analyze(FakeGitHub(current, comments=comments), 20, self.config, apply=apply)
 
-    def test_free_form_incomplete_bug_gets_actionable_missing_fields_and_copyable_reply(self):
+    def test_free_form_incomplete_bug_gets_a_short_missing_field_list(self):
         result = self.analyze(issue(body="It crashes."))
         for field in ("Database version", "Reproduction steps or minimal SQL", "Expected behavior", "Compatible mode", "Server encoding"):
             self.assertIn(field, result["details"]["missing"])
         self.assertIn("triage/needs-information", result["labels"]["add"])
         body = result["comment"]
-        self.assertIn("Action required from the issue author", body)
-        self.assertIn("SELECT version()", body)
-        self.assertIn("SHOW ivorysql.compatible_mode", body)
-        self.assertIn("Database version: TODO", body)
-        self.assertIn("AI model: TODO", body)
-        self.assertIn("https://github.com/example/postgres/issues/new/choose", body)
-        self.assertNotIn("Submission check passed", body)
+        self.assertIn("Yes. Please provide:", body)
+        self.assertIn("- Database version, branch, or commit ID.", body)
+        self.assertIn("- AI model name/version, or explicitly state not used.", body)
+        self.assertNotIn("TODO", body)
+        self.assertNotIn("issues/new/choose", body)
+        self.assertNotIn("No missing required information detected.", body)
 
     def test_complete_free_form_bug_does_not_require_exact_markdown_headings(self):
         result = self.analyze(issue(body=COMPLETE_BUG))
         self.assertEqual(result["details"]["missing"], [])
         self.assertNotIn("triage/needs-information", result["labels"]["add"])
-        self.assertIn("Submission check passed", result["comment"])
-        self.assertNotIn("Action required from the issue author", result["comment"])
+        self.assertIn("No missing required information detected.", result["comment"])
+        self.assertNotIn("Yes. Please provide:", result["comment"])
 
     def test_bug_form_headings_accept_expected_output_in_code(self):
         body = """### What happened?
@@ -93,17 +92,17 @@ not used
         self.assertNotIn("triage/needs-information", github.current["labels"])
         bots = [c for c in github.thread if c["user"]["login"] == triage.BOT]
         self.assertEqual(len(bots), 1)
-        self.assertIn("Submission check passed", bots[0]["body"])
-        self.assertNotIn("Action required from the issue author", bots[0]["body"])
+        self.assertIn("No missing required information detected.", bots[0]["body"])
+        self.assertNotIn("Yes. Please provide:", bots[0]["body"])
 
     def test_partial_supplements_shrink_the_checklist_and_repeated_runs_do_not_spam(self):
         github = FakeGitHub(issue(body="The server crashes."))
         triage.analyze(github, 20, self.config, apply=True)
         github.thread.append(comment("Database version: master\nAI model: not used"))
         result = triage.analyze(github, 20, self.config, apply=True)
-        self.assertNotIn("Database version: TODO", result["comment"])
-        self.assertNotIn("AI model: TODO", result["comment"])
-        self.assertIn("Expected behavior: TODO", result["comment"])
+        self.assertNotIn("- Database version, branch, or commit ID.", result["comment"])
+        self.assertNotIn("- AI model name/version, or explicitly state not used.", result["comment"])
+        self.assertIn("- Expected behavior or output.", result["comment"])
         triage.analyze(github, 20, self.config, apply=True)
         before = len(github.writes)
         triage.analyze(github, 20, self.config, apply=True)
@@ -181,7 +180,7 @@ not used
     def test_unknown_type_prompts_for_the_issue_type(self):
         result = self.analyze(issue(title="Please investigate", body="Something is unexpected.\nAI model: not used"))
         self.assertIn("Issue type", result["details"]["missing"])
-        self.assertIn("Issue type: TODO", result["comment"])
+        self.assertIn("- Issue type: bug, feature, or enhancement.", result["comment"])
 
     def test_build_only_bug_does_not_require_running_server_settings(self):
         body = "Description: The linker fails.\nDatabase version: master\nReproduction steps: Run meson setup and compile.\nExpected behavior: The build succeeds.\nAI model: not used"

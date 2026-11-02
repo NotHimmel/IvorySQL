@@ -27,8 +27,8 @@ class UpdateTests(unittest.TestCase):
         self.assertTrue(result["details"]["missing"])
         self.assertIn("triage/needs-review", github.current["labels"])
         self.assertNotIn("triage/needs-information", github.current["labels"])
-        self.assertNotIn("Action required from the issue author", result["comment"])
-        self.assertNotIn("Submission check passed", result["comment"])
+        self.assertNotIn("Yes. Please provide:", result["comment"])
+        self.assertNotIn("No missing required information detected.", result["comment"])
         self.assertNotIn("triage/accepted", github.current["labels"])
         for _ in range(2):
             self.run_triage(github)
@@ -84,7 +84,7 @@ class UpdateTests(unittest.TestCase):
         ai.assert_not_called()
         self.assertEqual({n for n in github.current["labels"] if n.startswith(("type/", "area/"))}, original)
         self.assertEqual(result["details"]["review_status"], "needs-review")
-        self.assertIn("Similarity search was deferred", result["comment"])
+        self.assertIn("Not refreshed; awaiting maintainer review.", result["comment"])
 
     def test_manual_review_label_is_authoritative(self):
         github = FakeGitHub(issue(body="The server crashes.", labels=["triage/needs-review"]))
@@ -178,7 +178,7 @@ class UpdateTests(unittest.TestCase):
                 result = self.run_triage(github)
                 self.assertIn("Compatible mode", result["details"]["conflicts"])
                 self.assertEqual(result["details"]["review_status"], "needs-review")
-                self.assertNotIn("Submission check passed", result["comment"])
+                self.assertNotIn("No missing required information detected.", result["comment"])
 
     def test_filled_field_only_code_block_is_accepted_as_an_author_reply(self):
         github = FakeGitHub(issue(body="The server crashes."))

@@ -296,7 +296,8 @@ class TriageTests(unittest.TestCase):
         with patch("triage.ask_ai", side_effect=RuntimeError("super-secret")):
             result = triage.analyze(FakeGitHub(), 20, self.config, ai_env=settings)
         self.assertIn("type/bug", result["labels"]["add"])
-        self.assertIn("falling back", result["comment"])
+        self.assertIn("falling back", result["analysis"]["method"])
+        self.assertNotIn("falling back", result["comment"])
         self.assertNotIn("super-secret", json.dumps(result))
 
     def test_ai_can_fill_an_unclassified_type_and_promote_a_candidate(self):
@@ -331,7 +332,8 @@ class TriageTests(unittest.TestCase):
         older = issue(3)
         with patch.object(FakeGitHub, "search", side_effect=RuntimeError("GitHub API returned HTTP 429")):
             result = triage.analyze(FakeGitHub(history=[older]), 20, self.config)
-        self.assertIn("Keyword search is unavailable", result["comment"])
+        self.assertTrue(any("Keyword search is unavailable" in note for note in result["analysis"]["notes"]))
+        self.assertIn("Keyword search is unavailable", triage.render_summary("example/postgres", result))
         self.assertIn("#3", result["comment"])
 
     def test_keyword_search_finds_an_older_issue(self):
