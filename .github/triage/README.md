@@ -70,6 +70,7 @@ submissions and free-form reports receive the same checks.
 | --- | --- |
 | All reports | A description and the reporter's AI model declaration |
 | Bugs | Database version or revision, reproduction instructions, and expected behavior |
+| Bugs with prose or unfenced reproduction instructions | Whether the author personally reproduced the problem with the reported version |
 | Database behavior bugs | Compatible mode and server encoding, or an explicit not-applicable explanation |
 
 The type comes from an existing manual type label (including legacy `bug`,
@@ -91,6 +92,7 @@ comment. For example:
 Description: Refreshing a subscription crashes the server.
 Database version: master
 Reproduction steps: Create a subscription and refresh it while decoding changes.
+Reproduced in a real environment: Yes
 Expected behavior: Subscription refresh completes without crashing.
 Compatible mode: pg
 Server encoding: UTF8
@@ -104,6 +106,7 @@ The next apply run follows these transitions:
 | First incomplete report, or a structured supplement that still leaves clear gaps | Update the missing-field checklist and use `triage/needs-information` |
 | The author responds in prose and the checks cannot confirm completeness | Replace the author request with a maintainer-review message and use `triage/needs-review` |
 | Conflicting answers cannot be ordered reliably | Request maintainer review; preserve existing labels in the conflicting type/model group |
+| The author explicitly says reproduction has not been verified | Route to maintainer review without repeatedly demanding a Yes answer |
 | Required information is present without unresolved conflicts | Clear bot-owned information/review labels and report that field checks passed |
 | A maintainer applies `triage/accepted` or a `resolution/*` label | Clear automated requests and let maintainers manage further questions |
 
@@ -122,6 +125,22 @@ declarations. Version numbers followed by sentence punctuation are recognized.
 Common prose such as "I expected ...", "in pg compatibility mode", and "UTF8
 encoding" is recognized. When the bug form selects `Other` for encoding, one
 unambiguous encoding in its additional-information section is accepted.
+
+Reproduction instructions and reported verification are separate facts. When a bug
+has only prose or unfenced example code and no explicit confirmation, the short
+checklist asks whether the author reproduced it in a real environment with the
+reported version. Formatting does not establish AI authorship, and fenced code
+does not establish that it was run. `Reproduced in a real environment: Yes` records
+the author's confirmation; `No` or `Not verified yet` routes the report to review.
+Running the real project module or build code counts for module/build reports;
+a database server is not required for those cases. The bot never executes submitted
+commands or claims independent verification.
+
+After this question, a new author reply of `Yes` or `No` also counts. Its binding
+to the question is retained for subsequent edits of that reply. Older unrelated
+answers and other users' comments do not supply confirmation. When field edit
+times establish a version or reproduction change newer than the confirmation,
+renewed confirmation is required.
 
 Required-field and lifecycle decisions run locally. AI classifies the type when
 labels or an explicit form choice have not fixed it; rules provide fallback.
@@ -198,6 +217,9 @@ copying complete discussions or API keys into its hidden state. Existing comment
 without this metadata continue to work and gain it on the next apply run.
 
 ## Fixed bot comment
+
+Every comment starts with `Thanks for contributing to IvorySQL!` after its hidden
+ownership marker.
 
 [comment.md](comment.md) fixes two visible sections:
 

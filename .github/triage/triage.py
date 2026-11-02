@@ -37,6 +37,7 @@ SUBMISSION_FIELDS = {
     "Issue description": ("Description", "A description of the problem or requested change."),
     "Database version": ("Database version", "Database version, branch, or commit ID."),
     "Reproduction steps or minimal SQL": ("Reproduction steps", "Reproduction steps or minimal SQL/commands."),
+    "Real reproduction": ("Reproduced in a real environment", "Have you reproduced this in a real environment with the reported version? Reply yes or no."),
     "Expected behavior": ("Expected behavior", "Expected behavior or output."),
     "Compatible mode": ("Compatible mode", "Compatible mode: oracle, pg, or both; explain if not applicable."),
     "Server encoding": ("Server encoding", "Server encoding; explain if not applicable."),
@@ -47,6 +48,7 @@ FIELD_PATTERNS = {
     "Issue description": r"Description|What happened\?|Issue description|Feature Request|Enhancement|问题描述",
     "Database version": r"(?:(?:database|ivorysql|postgresql|postgres|hpedb)[ \t]+)?version|commit(?:[ \t]+(?:id|sha))?|数据库版本|版本|提交(?:号|ID)?",
     "Reproduction steps or minimal SQL": r"Reproduction(?:[ \t]+steps)?|Steps[ \t]+to[ \t]+reproduce|Minimal[ \t]+(?:SQL|reproduction)|How can we reproduce it \(as minimally and precisely as possible\)\?|复现步骤|复现方法",
+    "Real reproduction": r"Reproduced in a real environment|Reproduction verified|实际复现|真实环境复现",
     "Expected behavior": r"Expected(?:[ \t]+(?:behaviou?r|results?|output))?|What did you expect to happen\?|预期(?:行为|结果)",
     "Compatible mode": r"Compatible[ \t]+mode|Compatibility[ \t]+mode|兼容模式",
     "Server encoding": r"Server[ \t]+encoding|Database[ \t]+encoding|服务端编码|服务器编码",
@@ -426,7 +428,7 @@ def unwrap_field_reply(text, requested=()):
     return text
 
 
-def report_records(issue, comments, requested=()):
+def report_records(issue, comments, requested=(), previous=None):
     author = issue.get("user", {}).get("login")
     records = [{"source": "body", "text": unwrap_field_reply(issue.get("body") or "", requested),
                 "content_sha256": digest(issue.get("body") or ""),
@@ -434,10 +436,19 @@ def report_records(issue, comments, requested=()):
     for index, comment in enumerate(comments):
         if (author and comment.get("user", {}).get("login") == author
                 and comment.get("user", {}).get("type") != "Bot"):
-            records.append({"source": "comment:" + str(comment.get("id", index)),
-                            "text": unwrap_field_reply(comment.get("body") or "", requested),
-                            "content_sha256": digest(comment.get("body") or ""),
-                            "updated_at": comment.get("updated_at") or comment.get("created_at")})
+            source = "comment:" + str(comment.get("id", index))
+            updated_at = comment.get("updated_at") or comment.get("created_at")
+            raw = comment.get("body") or ""
+            text = unwrap_field_reply(raw, requested)
+            request = (previous or {}).get("request", {})
+            bound = "Real reproduction" in (previous or {}).get("field_history", {}).get(source, {})
+            newer = request and int(comment.get("id", index)) > request["latest_comment_id"]
+            if (("Real reproduction" in requested and newer) or bound) and re.fullmatch(
+                    r"(?:yes|no|not yet|是|否|已复现|未复现)(?:[,.!，。！;；:-]\s*.*)?", raw.strip(), re.I | re.S):
+                # Interpret a direct answer only in the context of our question,
+                # and retain the binding for later edits of the same answer.
+                text = "Reproduced in a real environment: " + raw.strip()
+            records.append({"source": source, "text": text, "content_sha256": digest(raw), "updated_at": updated_at})
     # Stable ordering preserves API order for legacy fixtures without edit times.
     for record in records:
         if timestamp(record["updated_at"]) is None:
@@ -670,6 +681,8 @@ def extract_details(issue, text, suggestions, config=None, model_text=None):
                 if line.strip() and not line.lstrip().startswith(("#", "$ #", "//")))
         for _, language, code in fenced)
     has_reproduction = has_sql or has_steps or has_reproduction_field or has_commands
+    has_reproduction_code = any(meaningful_value(code) and any(
+        line.strip() and not line.lstrip().startswith(("#", "$ #", "//")) for line in code.splitlines()) for code in code_blocks)
     errors = re.findall(r"(?im)^[ \t]*(?:ERROR|FATAL|PANIC|错误|致命错误)[ \t]*[:：].{1,250}", text)
     missing = []
     descriptions = declared_fields(text, r"Description|What happened\?|Issue description|问题描述")
@@ -688,6 +701,7 @@ def extract_details(issue, text, suggestions, config=None, model_text=None):
     return {"versions": versions,
             "platforms": list(dict.fromkeys(p.casefold() for p in platforms))[:5],
             "has_reproduction_clues": has_reproduction,
+            "has_reproduction_code": has_reproduction_code,
             "errors": errors[:3], "reported_models": models, "missing": missing}
 
 
@@ -709,7 +723,8 @@ def submission_answer(sources, field):
                 # An inline follow-up field must not fill a preceding empty field.
                 if fence is None and not marker and re.match(
                         r"^[ \t]*(?:Issue type|Description|Database version|Reproduction steps|"
-                        r"Expected behavior|Compatible mode|Server encoding|AI models?)[ \t]*[:：]", line, re.I):
+                        r"Expected behavior|Compatible mode|Server encoding|AI models?|"
+                        r"Reproduced in a real environment|Reproduction verified)[ \t]*[:：]", line, re.I):
                     break
                 lines.append(line)
             return "\n".join(lines).strip()
@@ -721,7 +736,7 @@ def submission_answer(sources, field):
 
 def check_submission(issue, comments, suggestions, config, previous=None):
     requested = (previous or {}).get("request", {}).get("fields", [])
-    records = report_records(issue, comments, requested)
+    records = report_records(issue, comments, requested, previous)
     sources = [record["text"] for record in records]
     answers, provenance, conflicts, history = resolve_fields(records, previous)
     # Completeness checks use all author supplements, independently of the shorter
@@ -742,6 +757,27 @@ def check_submission(issue, comments, suggestions, config, previous=None):
         details["versions"] = database_versions("Database version: " + answers["Database version"])
     if "Reproduction steps or minimal SQL" in answers:
         details["has_reproduction_clues"] = meaningful_value(answers["Reproduction steps or minimal SQL"])
+        reproduction = answers["Reproduction steps or minimal SQL"]
+        blocks = re.findall(r"(?ms)^[ \t]*(`{3,}|~{3,})[^\n]*\n(.*?)^[ \t]*\1[ \t]*$", reproduction)
+        details["has_reproduction_code"] = any(meaningful_value(code) and any(
+            line.strip() and not line.lstrip().startswith(("#", "$ #", "//")) for line in code.splitlines()) for _, code in blocks)
+    confirmation = answers.get("Real reproduction", "").strip().strip("`*_ ")
+    reproduction_status = "unknown"
+    if re.match(r"(?:yes|confirmed|reproduced|是|已复现|已验证)(?:\b|[，。！]|$)", confirmation, re.I):
+        reproduction_status = "author-confirmed"
+    elif re.match(r"(?:no|not verified(?: yet)?|not reproduced(?: yet)?|not yet|否|未复现|尚未验证)(?:\b|[，。！]|$)", confirmation, re.I):
+        reproduction_status = "not-verified"
+    if reproduction_status == "author-confirmed":
+        confirmed_at = timestamp(provenance["Real reproduction"]["updated_at"])
+        if confirmed_at is not None and any((timestamp(provenance[name]["updated_at"]) or 0) > confirmed_at
+                                          for name in ("Database version", "Reproduction steps or minimal SQL") if name in provenance):
+            reproduction_status = "outdated"
+    if "Real reproduction" in conflicts:
+        reproduction_status = "conflicting"
+    if "type/bug" not in types:
+        reproduction_status = "not-applicable"
+        conflicts = [name for name in conflicts if name != "Real reproduction"]
+    details["reproduction_status"] = reproduction_status
     expected = answers.get("Expected behavior", "")
     mode = answers.get("Compatible mode", "")
     encoding = answers.get("Server encoding", "")
@@ -769,6 +805,9 @@ def check_submission(issue, comments, suggestions, config, previous=None):
         require("Database version", bool(details["versions"]))
         require("Reproduction steps or minimal SQL", details["has_reproduction_clues"])
         require("Expected behavior", meaningful_value(expected))
+        if details["has_reproduction_clues"]:
+            require("Real reproduction", reproduction_status in {"author-confirmed", "not-verified", "conflicting"}
+                    or (reproduction_status == "unknown" and details["has_reproduction_code"]))
         # Build failures do not have a running server whose settings can be read.
         areas = {s["label"] for s in suggestions if s["label"].startswith("area/")}
         build_only = "area/build" in areas and areas <= {"area/build", "area/testing"}
@@ -813,9 +852,10 @@ def review_state(issue, comments, details, previous):
     if details["conflicts"]:
         return dict({"review_status": "needs-review"}, **({"request": previous["request"]} if previous.get("request") else {}))
     if not details["missing"]:
-        return {"review_status": "needs-review" if details.get("classification_pending") else "complete"}
+        return {"review_status": "needs-review" if (details.get("classification_pending")
+                or details.get("reproduction_status") == "not-verified") else "complete"}
     request = previous.get("request", {})
-    records = report_records(issue, comments, request.get("fields", []))
+    records = report_records(issue, comments, request.get("fields", []), previous)
     versions = source_versions(records)
     changed = [record for record in records
                if request and ((record["source"] == "body" and versions["body"] != request["body_sha256"])
@@ -986,7 +1026,7 @@ def read_state(comment):
                 result["source_watermark"] = state["source_watermark"]
             if "field_history" in state:
                 history = state["field_history"]
-                if (not isinstance(history, dict) or len(history) > 25 or not all(
+                if (not isinstance(history, dict) or len(history) > 1 + 3 * len(FIELD_PATTERNS) or not all(
                         isinstance(source, str) and (source == "body" or re.fullmatch(r"comment:\d+", source))
                         and isinstance(fields, dict) and all(
                             name in FIELD_PATTERNS and isinstance(entry, dict)
@@ -1095,6 +1135,8 @@ def render_comment(repository, similar, plan, details):
         "needs-review": "Pending maintainer review; no further information requested for now.",
         "maintainer-reviewed": "No additional information requested; a maintainer has reviewed this issue.",
     }.get(status)
+    if status == "needs-review" and details.get("reproduction_status") == "not-verified":
+        information = "Pending maintainer review; reproduction has not been verified."
     if information is None:
         information = "Yes. Please provide:\n\n" + "\n".join(
             "- " + submission_field(name)[1] for name in details["missing"])
@@ -1139,7 +1181,7 @@ def analyze(github, number, config, apply=False, ai_env=None, target_kind="issue
     if automatic and "pending" not in saved and saved.get("input_sha256") == snapshot:
         return {"issue": number, "kind": kind, "skipped": "Author evidence and policy are unchanged; analysis reused"}
     text = reporter_text(issue, comments)
-    records = report_records(issue, comments, previous.get("request", {}).get("fields", []))
+    records = report_records(issue, comments, previous.get("request", {}).get("fields", []), previous)
     declared_type = resolve_fields(records, previous)[0].get("Issue type", "").strip().strip("`").casefold()
     classification_text = text + "\n\nIssue type: " + declared_type if declared_type else text
     suggestions = classify(issue, classification_text, config)

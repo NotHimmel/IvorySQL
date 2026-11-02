@@ -7,6 +7,7 @@ from test_triage import FakeGitHub, issue
 COMPLETE_BUG = """Description: Refreshing a subscription crashes the server.
 Database version: master
 Reproduction steps: Create a subscription and refresh it while decoding changes.
+Reproduced in a real environment: Yes
 Expected behavior: The subscription refreshes without crashing.
 Compatible mode: pg
 Server encoding: UTF8
@@ -185,7 +186,7 @@ not used
         self.assertEqual(result["details"]["review_status"], "needs-review")
 
     def test_build_only_bug_does_not_require_running_server_settings(self):
-        body = "Description: The linker fails.\nDatabase version: master\nReproduction steps: Run meson setup and compile.\nExpected behavior: The build succeeds.\nAI model: not used"
+        body = "Description: The linker fails.\nDatabase version: master\nReproduction steps: Run meson setup and compile.\nReproduced in a real environment: Yes\nExpected behavior: The build succeeds.\nAI model: not used"
         result = self.analyze(issue(title="Bug: meson build fails", body=body))
         self.assertEqual(result["details"]["missing"], [])
 

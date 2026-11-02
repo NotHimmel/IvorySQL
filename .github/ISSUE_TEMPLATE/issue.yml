@@ -40,6 +40,12 @@ body:
     attributes:
       label: Reproduction steps
       description: For bugs, provide numbered steps or minimal SQL, plus expected and actual results.
+  - type: dropdown
+    id: actual_reproduction
+    attributes:
+      label: Reproduced in a real environment
+      description: For bugs, have you personally run the steps with the reported version? Running the real module or build code counts; predicted output alone does not.
+      options: ["Yes", "No", "Not verified yet"]
   - type: textarea
     id: expected_behavior
     attributes:

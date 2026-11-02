@@ -207,7 +207,7 @@ class UpdateTests(unittest.TestCase):
     def test_natural_prose_can_supply_expected_behavior_and_runtime_settings(self):
         text = ("The subscription refresh crashes. PostgreSQL 18.1.\n1. Refresh a subscription.\n"
                 "I expected the refresh to finish without crashing.\n"
-                "The server runs in pg compatibility mode with UTF8 encoding.\nAI model: not used")
+                "The server runs in pg compatibility mode with UTF8 encoding.\nAI model: not used\nReproduced in a real environment: Yes")
         result = self.run_triage(FakeGitHub(issue(body=text)))
         self.assertEqual(result["details"]["missing"], [])
         self.assertEqual(self.run_triage(FakeGitHub(issue(body=text.replace("I expected", "I expect"))))["details"]["missing"], [])

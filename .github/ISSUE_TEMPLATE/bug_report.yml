@@ -41,6 +41,15 @@ body:
       required: true
 
   - type: dropdown
+    id: actual_reproduction
+    attributes:
+      label: Reproduced in a real environment
+      description: Have you personally run these steps with the reported version? For build or module issues, running the real project code counts. Predicted or AI-suggested output alone does not count.
+      options: ["Yes", "No", "Not verified yet"]
+    validations:
+      required: true
+
+  - type: dropdown
     id: version
     attributes:
       label: IvorySQL version

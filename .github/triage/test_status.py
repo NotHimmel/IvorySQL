@@ -62,7 +62,7 @@ class StatusTests(unittest.TestCase):
 
     def test_manual_information_request_is_preserved_after_acceptance(self):
         github = FakeGitHub(issue(body="IvorySQL master\n1. Start the server.\nAI model: not used\n"
-                                       "Expected behavior: The server starts successfully.\nCompatible mode: pg\nServer encoding: UTF8",
+                                       "Expected behavior: The server starts successfully.\nCompatible mode: pg\nServer encoding: UTF8\nReproduced in a real environment: Yes",
                                   labels=["needs-triage", "triage/accepted", "triage/needs-information"]))
         result = triage.analyze(github, 20, self.config, apply=True)
         self.assertEqual(result["details"]["missing"], [])
