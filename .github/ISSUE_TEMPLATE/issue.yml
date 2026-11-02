@@ -5,10 +5,10 @@ body:
     id: issue_type
     attributes:
       label: Issue type
-      description: Choose bug for incorrect behavior, feature for a new capability, or enhancement to improve existing behavior.
+      description: Optional. Choose a type if known, or leave blank for automatic classification.
       options: [bug, feature, enhancement]
     validations:
-      required: true
+      required: false
   - type: textarea
     id: ai_model
     attributes:

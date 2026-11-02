@@ -177,10 +177,12 @@ not used
                 result = self.analyze(issue(title=title, body="Description: Show the current compatibility mode in the prompt.\nAI model: not used"))
                 self.assertEqual(result["details"]["missing"], [])
 
-    def test_unknown_type_prompts_for_the_issue_type(self):
+    def test_unknown_type_is_a_maintainer_task_not_missing_author_information(self):
         result = self.analyze(issue(title="Please investigate", body="Something is unexpected.\nAI model: not used"))
-        self.assertIn("Issue type", result["details"]["missing"])
-        self.assertIn("- Issue type: bug, feature, or enhancement.", result["comment"])
+        self.assertNotIn("Issue type", result["details"]["missing"])
+        self.assertNotIn("Issue type:", result["comment"])
+        self.assertTrue(result["details"]["classification_pending"])
+        self.assertEqual(result["details"]["review_status"], "needs-review")
 
     def test_build_only_bug_does_not_require_running_server_settings(self):
         body = "Description: The linker fails.\nDatabase version: master\nReproduction steps: Run meson setup and compile.\nExpected behavior: The build succeeds.\nAI model: not used"

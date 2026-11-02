@@ -26,7 +26,7 @@ thresholds, and limits:
 - Information: bot-owned `triage/needs-information` asks the author for specific
   missing details. Maintainer acceptance or resolution clears automated requests;
   manually applied information-request labels remain for maintainers. Missing model
-  declarations, unknown issue types, empty descriptions, and incomplete bug reports
+  declarations, empty descriptions, and incomplete bug reports
   produce a specific checklist. Releases, `master`/`main`,
   PostgreSQL stable branches, and explicit commit IDs count as version information.
   Reproduction fields can contain prose; SQL, shell commands, and numbered steps
@@ -60,11 +60,15 @@ submissions and free-form reports receive the same checks.
 
 | Report type | Required information |
 | --- | --- |
-| All reports | A recognizable issue type, a description, and the reporter's AI model declaration |
+| All reports | A description and the reporter's AI model declaration |
 | Bugs | Database version or revision, reproduction instructions, and expected behavior |
 | Database behavior bugs | Compatible mode and server encoding, or an explicit not-applicable explanation |
 
-The type can come from the form, a manual type label, or classification. Build-only
+The type comes from an existing manual type label (including legacy `bug`,
+`feature`, `feature-request`, and `enhancement` labels), an optional explicit form
+choice, AI classification, or fallback rules, in that order. An unresolved type is
+a maintainer task and is never requested from the author. Other clear information
+gaps can still be requested. Build-only
 reports do not need running-server settings. Feature and enhancement requests do
 not need bug-only fields. The generic form includes the conditional bug fields;
 the existing bug form headings are also recognized. Placeholders such as TODO,
@@ -111,8 +115,9 @@ Common prose such as "I expected ...", "in pg compatibility mode", and "UTF8
 encoding" is recognized. When the bug form selects `Other` for encoding, one
 unambiguous encoding in its additional-information section is accepted.
 
-Required-field and lifecycle decisions run locally. Optional model classification
-can supply the inferred issue type or area when rules abstain. These checks do not
+Required-field and lifecycle decisions run locally. AI classifies the type when
+labels or an explicit form choice have not fixed it; rules provide fallback.
+Area rules remain primary, with optional model suggestions when rules abstain. These checks do not
 verify reproduction, accept the issue, or close it. Repeated runs reuse one bot
 comment. Automatic reminders require `AUTO_APPLY=true`; otherwise events produce
 previews and a manual `apply` run is needed to publish the guidance.

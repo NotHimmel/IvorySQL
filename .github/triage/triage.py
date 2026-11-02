@@ -32,7 +32,6 @@ STOP = set("a an the and or of to in for with is are was were be been this that 
            "steps reproduce reproduction description information environment "
            "please thanks using use sql select error test no response ai model models used".split())
 SUBMISSION_FIELDS = {
-    "Issue type": ("Issue type", "Issue type: bug, feature, or enhancement."),
     "Issue description": ("Description", "A description of the problem or requested change."),
     "Database version": ("Database version", "Database version, branch, or commit ID."),
     "Reproduction steps or minimal SQL": ("Reproduction steps", "Reproduction steps or minimal SQL/commands."),
@@ -736,8 +735,7 @@ def check_submission(issue, comments, suggestions, config, previous=None):
             missing.append(name)
 
     types = {s["label"] for s in suggestions if s["label"].startswith("type/")}
-    if len(types) != 1:
-        missing.insert(0, "Issue type")
+    details["classification_pending"] = len(types) != 1
     if "Database version" in answers:
         details["versions"] = database_versions("Database version: " + answers["Database version"])
     if "Reproduction steps or minimal SQL" in answers:
@@ -813,7 +811,7 @@ def review_state(issue, comments, details, previous):
     if details["conflicts"]:
         return dict({"review_status": "needs-review"}, **({"request": previous["request"]} if previous.get("request") else {}))
     if not details["missing"]:
-        return {"review_status": "complete"}
+        return {"review_status": "needs-review" if details.get("classification_pending") else "complete"}
     request = previous.get("request", {})
     records = report_records(issue, comments, request.get("fields", []))
     versions = source_versions(records)
@@ -1127,13 +1125,23 @@ def analyze(github, number, config, apply=False, ai_env=None, target_kind="issue
     classification_text = text + "\n\nIssue type: " + declared_type if declared_type else text
     suggestions = classify(issue, classification_text, config)
     manual_types = [n for n in label_names(issue) if n.startswith("type/") and n not in previous["managed"]]
+    if not manual_types:
+        aliases = {"bug": "type/bug", "feature": "type/feature", "feature-request": "type/feature",
+                   "enhancement": "type/enhancement"}
+        legacy_types = {aliases[name.casefold()] for name in label_names(issue) if name.casefold() in aliases}
+        if len(legacy_types) == 1:
+            manual_types = sorted(legacy_types)
 
     def with_manual_types(items):
-        return ([s for s in items if not s["label"].startswith("type/")] + [{"label": n} for n in manual_types]
+        return ([s for s in items if not s["label"].startswith("type/")] +
+                [{"label": n, "source": "label", "evidence": n} for n in manual_types]
                 if manual_types else items)
 
+    suggestions = with_manual_types(suggestions)
+    type_locked = bool(manual_types) or any(s["label"].startswith("type/") and s.get("source") == "form" for s in suggestions)
     preliminary = check_submission(issue, comments, with_manual_types(suggestions), config, previous)
     defer_analysis = (automatic and previous.get("review_status") in {"needs-information", "needs-review"}
+                      and not preliminary["classification_pending"]
                       and review_state(issue, comments, preliminary, previous)["review_status"] == "needs-review")
     history, capped = ([], False) if defer_analysis else github.history(config["history_limit"])
     notes = []
@@ -1155,22 +1163,27 @@ def analyze(github, number, config, apply=False, ai_env=None, target_kind="issue
     if defer_analysis:
         ai_status = "Deferred; the author update is awaiting maintainer review."
     ai_matches = set()
+    ai_error = None
     if any(settings[1:]) and not defer_analysis:
         if not all(settings):
             ai_status = "Incomplete configuration; falling back to rules and text similarity."
         else:
             try:
                 ai_labels, matches = ask_ai(issue, text, candidates, config, *settings)
-                # Use AI for a group only when it does not contradict the rules.
-                for prefix in ("type/", "area/"):
-                    if not any(s["label"].startswith(prefix) for s in suggestions):
-                        suggestions.extend(s for s in ai_labels if s["label"].startswith(prefix))
+                ai_types = [s for s in ai_labels if s["label"].startswith("type/")]
+                if ai_types and not type_locked:
+                    suggestions = [s for s in suggestions if not s["label"].startswith("type/")] + ai_types
+                if not any(s["label"].startswith("area/") for s in suggestions):
+                    suggestions.extend(s for s in ai_labels if s["label"].startswith("area/"))
                 for item in candidates:
                     item.update(matches.get(item["number"], {}))
                 ai_matches = set(matches)
                 ai_status = "Used; labels and quoted evidence passed validation. Maintainer review is still needed."
-            except (RuntimeError, ValueError, KeyError, TypeError, IndexError, AttributeError):
+            except (RuntimeError, ValueError, KeyError, TypeError, IndexError, AttributeError) as error:
                 ai_status = "Request failed or output validation failed; falling back to rules and text similarity."
+                ai_error = {"kind": type(error).__name__}
+                if isinstance(error, APIError):
+                    ai_error["http_status"] = error.status
     if settings[1]:
         ai_status = "Configured triage model: " + settings[1] + "; " + ai_status
     visible = [c for c in candidates if c["number"] in ai_matches or (
@@ -1180,6 +1193,8 @@ def analyze(github, number, config, apply=False, ai_env=None, target_kind="issue
     details["analysis_deferred"] = defer_analysis
     review = review_state(issue, comments, details, previous)
     details["review_status"] = review["review_status"]
+    if details["classification_pending"]:
+        notes.append("Issue type could not be determined; maintainer classification is needed, not an author response.")
     if details["conflicts"]:
         notes.append("Conflicting answers have uncertain edit order; maintainer review is needed for: " + ", ".join(details["conflicts"]))
     suggestions.extend({"label": model["label"], "evidence": model["evidence"], "source": "reporter"}
@@ -1198,7 +1213,7 @@ def analyze(github, number, config, apply=False, ai_env=None, target_kind="issue
     result = {"issue": number, "kind": kind, "mode": "apply" if apply else "preview",
               "labels": {"add": plan["add"], "remove": plan["remove"]},
               "details": details, "comment": body,
-              "analysis": {"method": ai_status, "notes": list(dict.fromkeys(notes)),
+              "analysis": {"method": ai_status, "error": ai_error, "notes": list(dict.fromkeys(notes)),
                            "classification": suggestions,
                            "similar": [{key: value for key, value in item.items() if key != "body"} for item in similar]}}
     if apply:

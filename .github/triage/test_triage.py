@@ -313,14 +313,14 @@ class TriageTests(unittest.TestCase):
         self.assertIn("possible duplicate", result["comment"])
         self.assertNotIn("resolution/duplicate", result["labels"]["add"])
 
-    def test_ai_does_not_override_rule_classification(self):
+    def test_ai_type_classification_takes_priority_over_title_keywords_without_manual_labels(self):
         settings = {"TRIAGE_AI_ENDPOINT": "https://example.test/chat", "TRIAGE_AI_MODEL": "model",
                     "AI_API_KEY": "key"}
         with patch("triage.ask_ai", return_value=(
                 [{"label": "type/feature", "source": "ai", "evidence": "logical replication"}], {})):
             result = triage.analyze(FakeGitHub(), 20, self.config, ai_env=settings)
-        self.assertIn("type/bug", result["labels"]["add"])
-        self.assertNotIn("type/feature", result["labels"]["add"])
+        self.assertIn("type/feature", result["labels"]["add"])
+        self.assertNotIn("type/bug", result["labels"]["add"])
 
     def test_manual_bug_type_drives_information_check(self):
         github = FakeGitHub(issue(title="Unexpected behavior", body="Something is wrong", labels=["type/bug"]))
