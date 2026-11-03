@@ -162,3 +162,14 @@ class HistoryCacheTests(unittest.TestCase):
             report = triage.run_targets(Batch(), targets, triage.load_config())
         self.assertEqual(report["counts"], {"processed": 3, "skipped": 0, "failed": 0})
         pages.assert_called_once()
+
+    def test_overlapping_history_pages_are_deduplicated_before_persisting(self):
+        client = self.client()
+        with patch.object(client, "pages", return_value=[issue(1), issue(2), issue(1)]):
+            records, _ = client.history(1000)
+        self.assertEqual([record["number"] for record in records], [1, 2])
+        other = self.client()
+        with patch.object(other, "pages") as pages:
+            records, _ = other.history(1000)
+        pages.assert_not_called()
+        self.assertEqual([record["number"] for record in records], [1, 2])

@@ -407,6 +407,9 @@ class GitHub:
                     capped = cache["capped"] or len(merged) >= limit
                     full_synced_at = cache["full_synced_at"]
                     self.history_notes.append("History cache incrementally refreshed from updated issues.")
+                # Concurrent updates can shift page boundaries and repeat a number.
+                # Persist one entry per number so the next worker can reuse the cache.
+                items = list({item["number"]: item for item in items}.values())
                 # Store only ranking inputs, never tokens, event payloads, comments,
                 # or API-provided URLs that could affect request destinations.
                 items = [{"number": item["number"], "title": (item.get("title") or "")[:1000],
