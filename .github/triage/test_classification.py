@@ -56,7 +56,7 @@ class ClassificationTests(unittest.TestCase):
         with patch("triage.ask_ai", side_effect=triage.APIError(503)):
             result = triage.analyze(FakeGitHub(current), 20, self.config, ai_env=self.ai_env)
         self.assertEqual(result["details"]["missing"], [])
-        self.assertIn("triage/needs-review", result["labels"]["add"])
+        self.assertIn("triage/needs-reproduce", result["labels"]["add"])
         self.assertNotIn("Issue type:", result["comment"])
 
     def test_unknown_type_does_not_hide_other_clear_missing_fields(self):

@@ -23,16 +23,16 @@ class UpdateTests(unittest.TestCase):
         self.run_triage(github)
         github.thread.append(comment("The crash only occurs after restarting the replica."))
         result = self.run_triage(github)
-        self.assertEqual(result["details"]["review_status"], "needs-review")
+        self.assertEqual(result["details"]["review_status"], "needs-reproduce")
         self.assertTrue(result["details"]["missing"])
-        self.assertIn("triage/needs-review", github.current["labels"])
+        self.assertIn("triage/needs-reproduce", github.current["labels"])
         self.assertNotIn("triage/needs-information", github.current["labels"])
         self.assertNotIn("Yes. Please provide:", result["comment"])
         self.assertNotIn("No missing required information detected.", result["comment"])
         self.assertNotIn("triage/accepted", github.current["labels"])
         for _ in range(2):
             self.run_triage(github)
-        self.assertEqual(self.state(github)["review_status"], "needs-review")
+        self.assertEqual(self.state(github)["review_status"], "needs-reproduce")
 
     def test_structured_partial_response_keeps_only_remaining_information_requests(self):
         github = FakeGitHub(issue(body="The server crashes."))
@@ -52,7 +52,7 @@ class UpdateTests(unittest.TestCase):
         github.current["labels"].append("triage/accepted")
         result = self.run_triage(github)
         self.assertEqual(result["details"]["review_status"], "maintainer-reviewed")
-        self.assertNotIn("triage/needs-review", github.current["labels"])
+        self.assertNotIn("triage/needs-reproduce", github.current["labels"])
         self.assertNotIn("triage/needs-information", github.current["labels"])
 
     def test_complete_supplement_clears_a_previous_review_request(self):
@@ -63,7 +63,7 @@ class UpdateTests(unittest.TestCase):
         github.thread.append(comment(COMPLETE_BUG, number=102, updated_at="2026-10-30T12:00:00Z"))
         result = self.run_triage(github)
         self.assertEqual(result["details"]["review_status"], "complete")
-        self.assertNotIn("triage/needs-review", github.current["labels"])
+        self.assertNotIn("triage/needs-reproduce", github.current["labels"])
 
     def test_other_user_response_does_not_end_waiting_for_the_author(self):
         github = FakeGitHub(issue(body="The server crashes."))
@@ -83,13 +83,13 @@ class UpdateTests(unittest.TestCase):
         search.assert_not_called()
         ai.assert_not_called()
         self.assertEqual({n for n in github.current["labels"] if n.startswith(("type/", "area/"))}, original)
-        self.assertEqual(result["details"]["review_status"], "needs-review")
+        self.assertEqual(result["details"]["review_status"], "needs-reproduce")
         self.assertIn("Not refreshed; awaiting maintainer review.", result["comment"])
 
     def test_manual_review_label_is_authoritative(self):
-        github = FakeGitHub(issue(body="The server crashes.", labels=["triage/needs-review"]))
+        github = FakeGitHub(issue(body="The server crashes.", labels=["triage/needs-reproduce"]))
         result = self.run_triage(github)
-        self.assertEqual(result["details"]["review_status"], "needs-review")
+        self.assertEqual(result["details"]["review_status"], "needs-reproduce")
         self.assertNotIn("triage/needs-information", github.current["labels"])
 
     def test_manual_information_request_is_retained_after_a_plain_response(self):
@@ -111,7 +111,7 @@ class UpdateTests(unittest.TestCase):
         github = FakeGitHub(current, comments=[comment("AI model: different-model")])
         result = self.run_triage(github)
         self.assertIn("AI model", result["details"]["conflicts"])
-        self.assertIn("triage/needs-review", github.current["labels"])
+        self.assertIn("triage/needs-reproduce", github.current["labels"])
         self.assertFalse(any(label.startswith("ai-model/") for label in github.current["labels"]))
 
     def test_new_body_answer_overrides_an_older_comment(self):
@@ -167,7 +167,7 @@ class UpdateTests(unittest.TestCase):
         for _ in range(2):
             result = self.run_triage(github)
             self.assertIn("Compatible mode", result["details"]["conflicts"])
-            self.assertEqual(result["details"]["review_status"], "needs-review")
+            self.assertEqual(result["details"]["review_status"], "needs-reproduce")
 
     def test_missing_or_tied_edit_times_route_conflicting_answers_to_review(self):
         for edited_at in (None, "2026-10-29T12:00:00Z"):
@@ -177,7 +177,7 @@ class UpdateTests(unittest.TestCase):
                 github = FakeGitHub(current, comments=[comment("Compatible mode: oracle")])
                 result = self.run_triage(github)
                 self.assertIn("Compatible mode", result["details"]["conflicts"])
-                self.assertEqual(result["details"]["review_status"], "needs-review")
+                self.assertEqual(result["details"]["review_status"], "needs-reproduce")
                 self.assertNotIn("No missing required information detected.", result["comment"])
 
     def test_filled_field_only_code_block_is_accepted_as_an_author_reply(self):

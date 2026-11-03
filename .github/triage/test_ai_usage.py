@@ -105,7 +105,7 @@ class AIUsageTests(unittest.TestCase):
         github.thread.append(comment("AI model: model-a-v2", updated_at="unknown"))
         result = self.run_triage(github, apply=True)
         self.assertIn("AI model", result["details"]["conflicts"])
-        self.assertIn("triage/needs-review", github.current["labels"])
+        self.assertIn("triage/needs-reproduce", github.current["labels"])
         self.assertIn("ai-model/not-used", github.current["labels"])
         self.assertNotIn("ai-model/model-a-v2", github.current["labels"])
 

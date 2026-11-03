@@ -183,7 +183,7 @@ not used
         self.assertNotIn("Issue type", result["details"]["missing"])
         self.assertNotIn("Issue type:", result["comment"])
         self.assertTrue(result["details"]["classification_pending"])
-        self.assertEqual(result["details"]["review_status"], "needs-review")
+        self.assertEqual(result["details"]["review_status"], "needs-reproduce")
 
     def test_build_only_bug_does_not_require_running_server_settings(self):
         body = "Description: The linker fails.\nDatabase version: master\nReproduction steps: Run meson setup and compile.\nReproduced in a real environment: Yes\nExpected behavior: The build succeeds.\nAI model: not used"

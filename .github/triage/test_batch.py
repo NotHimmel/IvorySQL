@@ -76,6 +76,15 @@ class BatchTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Invalid matrix target"):
             triage.select_targets(self.config, env, event, dispatch=True)
 
+    def test_shared_worker_accepts_only_bounded_validated_targets(self):
+        targets = [{"number": 12, "kind": "issue"}, {"number": 13, "kind": "issue"}]
+        self.assertEqual(triage.select_targets(self.config, {"TRIAGE_TARGETS": json.dumps(targets)}, {}), targets)
+        for invalid in ("invalid", "{}", "[]", '[{"number": true, "kind": "issue"}]',
+                        '[{"number": 12, "kind": "pr"}]', json.dumps(targets + targets),
+                        json.dumps([{"number": n, "kind": "issue"} for n in range(1, 52)])):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                triage.select_targets(self.config, {"TRIAGE_TARGETS": invalid}, {})
+
     def test_plan_only_needs_no_credentials_and_never_prints_temporary_token(self):
         with tempfile.TemporaryDirectory() as directory:
             event_file = Path(directory) / "event.json"
@@ -177,10 +186,16 @@ class BatchTests(unittest.TestCase):
         self.assertEqual(pages.call_count, 1)
         self.assertEqual([item["number"] for item in second], [1, 2])
 
-    def test_workflow_matrix_keeps_per_number_serialization_and_trusted_checkout(self):
+    def test_workflow_serializes_repository_batches_without_replacing_pending_events(self):
         workflow = (Path(triage.__file__).parent.parent / "workflows" / "issue-triage.yml").read_text()
-        self.assertIn("fail-fast: false", workflow)
-        self.assertIn("matrix.target.number", workflow)
+        self.assertNotIn("matrix:", workflow)
+        self.assertIn("TRIAGE_TARGETS: ${{ needs.plan.outputs.targets }}", workflow)
+        self.assertIn("group: issue-triage-${{ github.repository }}", workflow)
+        self.assertIn("cancel-in-progress: false", workflow)
+        self.assertIn("queue: max", workflow)
+        self.assertIn("actions/cache/restore@", workflow)
+        self.assertIn("actions/cache/save@", workflow)
+        self.assertIn("history_cache_updated == 'true'", workflow)
         self.assertNotIn("pull-requests: write", workflow)
         self.assertEqual(workflow.count("ref: ${{ github.event.repository.default_branch }}"), 2)
         self.assertNotIn("github.event.pull_request.head", workflow)

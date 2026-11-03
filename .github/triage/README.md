@@ -32,7 +32,7 @@ thresholds, and limits:
   Reproduction fields can contain prose; SQL, shell commands, and numbered steps
   are also accepted clues. Environment scaffolding and log sections are excluded.
   These checks do not prove that reproduction succeeds.
-- Review: `triage/needs-review` routes an author response or uncertain source
+- Reproduction/clarification: `triage/needs-reproduce` routes an author response or uncertain source
   conflict to maintainers. It does not mean the report is complete or accepted.
 - Resolutions: `resolution/duplicate`, `resolution/invalid`, `resolution/wontfix` are
   maintainer decisions. Confirmed duplicates should link to their original issue.
@@ -58,6 +58,17 @@ before removing the redundant assignment. Legacy `enhancement` is also redundant
 when an explicit `type/feature` exists, matching older feature templates. Conflicting
 type assignments are left for maintainers. The normalized label retains the manual
 priority of the original classification, including after an interrupted writeback.
+
+## Renaming the previous review label
+
+`triage/needs-reproduce` replaces `triage/needs-review` everywhere. The state rules
+are unchanged: it covers unverified reproduction, ordinary author replies,
+classification uncertainty, and conflicting declarations. Rename the existing
+repository label to `triage/needs-reproduce` in GitHub's label settings before
+replaying existing reports; GitHub preserves its issue assignments. Old hidden
+`needs-review` states and pending ownership records are recognized so completion
+can still clear bot-owned labels after the rename. Manual labels remain manual.
+Do not delete and recreate the old label: that would discard its assignments.
 
 ## Guiding incomplete submissions
 
@@ -104,7 +115,7 @@ The next apply run follows these transitions:
 | Situation | Automatic result |
 | --- | --- |
 | First incomplete report, or a structured supplement that still leaves clear gaps | Update the missing-field checklist and use `triage/needs-information` |
-| The author responds in prose and the checks cannot confirm completeness | Replace the author request with a maintainer-review message and use `triage/needs-review` |
+| The author responds in prose and the checks cannot confirm completeness | Replace the author request with a maintainer-review message and use `triage/needs-reproduce` |
 | Conflicting answers cannot be ordered reliably | Request maintainer review; preserve existing labels in the conflicting type/model group |
 | The author explicitly says reproduction has not been verified | Route to maintainer review without repeatedly demanding a Yes answer |
 | Required information is present without unresolved conflicts | Clear bot-owned information/review labels and report that field checks passed |
@@ -299,8 +310,7 @@ branch. Both planning and execution always check out that branch.
 
 1. In Actions -> Issue triage -> Run workflow, select `sync-labels` to create missing
    fixed labels. Existing label colors and descriptions are preserved.
-2. Select `preview` and provide `numbers`, for example `12,20-25,31`. Review each
-   matrix task's Summary. Closed historical reports can be replayed offline.
+2. Select `preview` and provide `numbers`, for example `12,20-25,31`. Review the batch Summary and its per-issue outcomes. Closed historical reports can be replayed offline.
 3. Select `apply` to update labels and the bot comment for the selected issues.
 4. After checking results, set the repository Actions variable
    `AUTO_APPLY=true` to enable automatic label and comment writes. Otherwise event-triggered
@@ -317,14 +327,63 @@ and IDs sorted. `all`, zero, negative numbers, and open-ended ranges are invalid
 Issue and PR numbers share a sequence; PRs within a range are detected and skipped.
 
 The default limit is 50 unique IDs (`max_batch_items`, configurable up to 200).
-Planning only validates IDs and emits sanitized matrix data without credentials or
-API requests. At most two matrix tasks run in parallel. Runs for the same number
-are serialized. One failed task does not cancel others; its task is marked failed.
-Each task has its own Summary. `sync-labels` ignores ranges and creates one task.
+Planning only validates IDs and emits sanitized target data without credentials or
+API requests. Execution uses one Python process for the whole batch, processing
+issues sequentially and sharing a history snapshot. The repository-wide execution
+concurrency group uses `queue: max`, allowing up to 100 pending jobs instead of
+replacing older pending events. Jobs beyond GitHub's queue limit are canceled and
+must be replayed manually. Other workflows are outside this concurrency group.
+A non-rate-limit failure on one issue does not cancel other targets. A rate-limit
+cooldown stops the remaining targets, reports them as failed, and exits nonzero;
+rerun those numbers after the reported time. `sync-labels` ignores ranges.
+The worker has a 180-minute job limit; split very large or slow batches.
 
 Planning requests only `contents: read`; execution requests `contents: read` and
 `issues: write`. It uses `GITHUB_TOKEN`, without a personal PAT. Before applying,
 the script rereads the issue and comments and rejects stale analysis if they changed.
+
+## History caching and API rate limits
+
+The workflow restores and saves a repository-scoped Actions cache containing only
+bounded history inputs and request pacing/cooldown timestamps. It never stores
+model credentials, raw event payloads, or the authoritative issue/comment reads.
+Cache actions are pinned to an immutable official `actions/cache` commit.
+
+One process fetches history at most once per limit and shares it across a batch.
+Across workflow runs, `history_cache_ttl` defaults to 900 seconds. A valid snapshot
+inside that freshness window is reused without a history API request. After it
+expires, list issues updated since the previous scan began, with a 60-second
+overlap, merge their new titles/bodies/states, and retain the bounded recent window.
+If updates overflow the bound, the cache is invalid, or the daily full-refresh
+interval (`history_full_sync_interval`, 86400 seconds) has elapsed, perform a bounded
+full scan instead. Periodic full refreshes occur on the next run and remove deleted
+records. Cache failures fall back to a bounded scan or in-memory reuse and are
+noted in diagnostics. Cached candidate descriptions can be up to the freshness
+window old; keyword searches supplement them. Current issue and comments are
+always read from GitHub before deciding or writing changes.
+
+GitHub requests are sequential and paced by resource. Start with at least one
+second between ordinary/GraphQL requests, 2.2 seconds between searches, and eight
+seconds between content writes. Response rate-limit headers further slow requests
+based on remaining budget and reset time, reserving headroom. This does not grant
+an independent quota: other repository workflows can consume the same budget.
+
+For a rejected request, honor both `Retry-After` (seconds or HTTP date) and an
+exhausted primary bucket's reset time. Secondary-limit responses without those
+headers wait at least one minute with exponential backoff. Ordinary permission
+403 responses are not retried. At most three attempts and 120 seconds of pacing/
+retry budget are allowed per request; longer waits stop the batch with a retry time.
+The cooldown is saved for subsequent queued workers, which stop before making
+another API request if the remaining cooldown exceeds their wait budget. Cache
+save/restore must succeed for that cross-run handoff. A cache outage still leaves
+per-process pacing and bounded retries, but loses the shared cooldown.
+Unknown outcomes from network/write failures are not automatically retried; the
+existing write journal supports recovery on the next run. AI failures continue to
+fall back to local rules and are separate from GitHub rate control.
+
+See [GitHub rate limits](https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api),
+[REST API best practices](https://docs.github.com/en/rest/using-the-rest-api/best-practices-for-using-the-rest-api),
+and [Actions concurrency queues](https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency).
 
 ## Similarity search
 
@@ -421,8 +480,11 @@ python3 -B .github/triage/triage.py --repository OWNER/REPO --numbers '12,20-25,
 Add `--apply` to write changes. Use `--sync-labels --apply` to create fixed labels,
 `--config PATH` for custom configuration, or `--plan-only` to validate ranges
 without credentials. Offline fixtures cannot be combined with write modes or ranges.
-Local batches run sequentially and reuse history scans, continue after individual
-failures, and return a nonzero status if any item failed. Result JSON and optional
+Local batches run sequentially and reuse history scans, continue after non-rate
+failures, and return a nonzero status if any item failed. To persist snapshots and
+cooldowns locally, set `TRIAGE_HISTORY_CACHE` to a writable JSON path. Local
+processes do not participate in the Actions repository queue; avoid running
+multiple local writers for the same repository. Result JSON and optional
 `GITHUB_STEP_SUMMARY` include per-item outcomes and aggregate counts.
 
 The checks workflow runs offline tests when automation or issue templates change.

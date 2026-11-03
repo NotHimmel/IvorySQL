@@ -4,7 +4,8 @@
 import argparse
 import base64
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import hashlib
 import html
 import json
@@ -13,6 +14,7 @@ import os
 from pathlib import Path
 import re
 import sys
+import time
 from string import Template
 import unicodedata
 from urllib.error import HTTPError, URLError
@@ -71,7 +73,129 @@ class APIError(RuntimeError):
         super().__init__(f"{'AI' if ai else 'GitHub'} API returned HTTP {status}")
 
 
-def request_json(url, token, method="GET", data=None, ai=False):
+class RateLimitError(APIError):
+    def __init__(self, retry_at):
+        super().__init__(429)
+        self.retry_at = retry_at
+
+    def __str__(self):
+        retry = datetime.fromtimestamp(self.retry_at, timezone.utc).isoformat()
+        return "GitHub rate limit reached; retry after " + retry
+
+
+def response_headers(headers):
+    return {str(key).casefold(): str(value) for key, value in (headers or {}).items()}
+
+
+def rate_limit_until(headers, status=None, message=""):
+    """Distinguish a rate limit from an ordinary permission denial."""
+    headers = response_headers(headers)
+    now = time.time()
+    retry_at = None
+    retry = headers.get("retry-after", "")
+    try:
+        retry_at = now + max(0, float(retry))
+    except ValueError:
+        try:
+            retry_at = parsedate_to_datetime(retry).timestamp()
+        except (ValueError, TypeError, OverflowError):
+            pass
+    if headers.get("x-ratelimit-remaining") == "0":
+        try:
+            retry_at = max(retry_at or now, float(headers["x-ratelimit-reset"]) + 1)
+        except (KeyError, ValueError):
+            retry_at = max(retry_at or now, now + 60)
+    limited = status == 429 or (status == 403 and (
+        retry_at is not None or any(term in message.casefold() for term in (
+            "rate limit", "abuse detection", "temporarily blocked"))))
+    if status is not None and not limited:
+        return None
+    return max(now + 1, retry_at or now + 60) if limited or retry_at is not None else None
+
+
+class GitHubRateGate:
+    """Pace one repository worker and bound waits for rejected requests."""
+    def __init__(self, state_path=None, repository=None):
+        self.next_request = {}
+        self.next_write = 0
+        self.blocked_until = 0
+        self.state_path = Path(state_path) if state_path else None
+        self.repository = repository
+        self.updated = False
+        if self.state_path:
+            try:
+                if self.state_path.stat().st_size > 4096:
+                    raise ValueError("Rate state too large")
+                state = json.loads(self.state_path.read_text(encoding="utf-8"))
+                resources = state["next_request"]
+                values = [state["next_write"], state["blocked_until"], *resources.values()]
+                if (state.get("version") != 1 or state.get("repository") != repository
+                        or set(resources) - {"core", "search", "graphql"}
+                        or not all(isinstance(value, (int, float)) and not isinstance(value, bool)
+                                   and math.isfinite(value) and 0 <= value <= time.time() + 604800 for value in values)):
+                    raise ValueError("Invalid rate state")
+                self.next_request = resources
+                self.next_write = state["next_write"]
+                self.blocked_until = state["blocked_until"]
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                pass
+
+    def save(self):
+        if self.state_path:
+            try:
+                self.state_path.parent.mkdir(parents=True, exist_ok=True)
+                temporary = self.state_path.with_suffix(".tmp")
+                temporary.write_text(json.dumps({"version": 1, "repository": self.repository,
+                    "next_request": self.next_request, "next_write": self.next_write,
+                    "blocked_until": self.blocked_until}), encoding="utf-8")
+                temporary.replace(self.state_path)
+                self.updated = True
+            except OSError:
+                pass
+
+    def defer(self, until):
+        self.blocked_until = max(self.blocked_until, until)
+        self.save()
+
+    def resource(self, url):
+        path = urlsplit(url).path
+        return "search" if path.startswith("/search/") else "graphql" if path == "/graphql" else "core"
+
+    def wait(self, url, method, deadline):
+        resource = self.resource(url)
+        until = max(self.blocked_until, self.next_request.get(resource, 0),
+                    self.next_write if method != "GET" and resource != "graphql" else 0)
+        while until > time.time():
+            delay = until - time.time()
+            if delay > deadline - time.monotonic():
+                # Stop the batch rather than starting more work with no budget.
+                self.defer(until)
+                raise RateLimitError(until)
+            time.sleep(min(delay, 30))
+        self.next_request[resource] = time.time() + (2.2 if resource == "search" else 1)
+        if method != "GET" and resource != "graphql":
+            self.next_write = time.time() + 8
+        self.save()
+
+    def observe(self, url, headers):
+        headers = response_headers(headers)
+        resource = headers.get("x-ratelimit-resource") or self.resource(url)
+        if resource not in {"core", "search", "graphql"}:
+            resource = self.resource(url)
+        try:
+            remaining = int(headers["x-ratelimit-remaining"])
+            reset = float(headers["x-ratelimit-reset"])
+        except (KeyError, ValueError):
+            return
+        reserve = 2 if resource == "search" else 50
+        delay = max(0, reset - time.time()) / max(1, remaining - reserve)
+        if remaining == 0:
+            delay = max(1, reset + 1 - time.time())
+        self.next_request[resource] = max(self.next_request.get(resource, 0), time.time() + delay)
+        self.save()
+
+
+def request_json(url, token, method="GET", data=None, ai=False, gate=None):
     headers = {"Authorization": "Bearer " + token,
                "Accept": "application/json", "User-Agent": "ivorysql-issue-triage"}
     if not ai:
@@ -81,17 +205,39 @@ def request_json(url, token, method="GET", data=None, ai=False):
         body = json.dumps(data).encode("utf-8")
         headers["Content-Type"] = "application/json"
     req = Request(url, data=body, headers=headers, method=method)
-    try:
-        with build_opener(NoRedirect()).open(req, timeout=45) as response:
-            raw = response.read(5_000_001)
-        if len(raw) > 5_000_000:
-            raise ValueError("API response exceeded 5 MB")
-        return json.loads(raw)
-    except HTTPError as exc:
-        # Do not log request headers, endpoints containing query secrets, or bodies.
-        raise APIError(exc.code, ai) from None
-    except (URLError, TimeoutError, OSError):
-        raise RuntimeError(f"{'AI' if ai else 'GitHub'} API request failed") from None
+    deadline = time.monotonic() + 120
+    for attempt in range(3 if gate else 1):
+        if gate:
+            gate.wait(url, method, deadline)
+        try:
+            with build_opener(NoRedirect()).open(req, timeout=45) as response:
+                if gate:
+                    gate.observe(url, response.headers)
+                raw = response.read(5_000_001)
+            if len(raw) > 5_000_000:
+                raise ValueError("API response exceeded 5 MB")
+            return json.loads(raw)
+        except HTTPError as exc:
+            # Inspect only a bounded error message; never log headers or bodies.
+            message = ""
+            if gate and exc.code in (403, 429):
+                try:
+                    message = str(json.loads(exc.read(65536)).get("message", ""))
+                except (ValueError, TypeError, AttributeError, OSError):
+                    pass
+                retry_at = rate_limit_until(exc.headers, exc.code, message)
+                if retry_at is not None:
+                    # A rejection is safe to retry, including for a write. Network
+                    # failures are not retried: their server-side outcome is unknown.
+                    retry_at = max(retry_at, time.time() + (60 * 2 ** attempt if not response_headers(exc.headers).get("retry-after")
+                                   and response_headers(exc.headers).get("x-ratelimit-remaining") != "0" else 1))
+                    gate.defer(retry_at)
+                    if attempt == 2:
+                        raise RateLimitError(retry_at) from None
+                    continue
+            raise APIError(exc.code, ai) from None
+        except (URLError, TimeoutError, OSError):
+            raise RuntimeError(f"{'AI' if ai else 'GitHub'} API request failed") from None
 
 
 def chat_endpoint(endpoint):
@@ -130,16 +276,22 @@ def resolve_ai_env(config, env, event, dispatch=False):
 
 
 class GitHub:
-    def __init__(self, repository, token):
+    def __init__(self, repository, token, cache_path=None, cache_ttl=900, full_sync_interval=86400):
         if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository):
             raise ValueError("repository must be owner/name")
         self.repository = repository
         self.token = token
         self.root = f"/repos/{repository}"
         self._history = {}
+        self.cache_path = Path(cache_path) if cache_path else None
+        self.rate_gate = GitHubRateGate(self.cache_path.with_name("rate-limit.json") if self.cache_path else None, repository)
+        self.cache_ttl = cache_ttl
+        self.full_sync_interval = full_sync_interval
+        self.cache_updated = False
+        self.history_notes = []
 
     def call(self, path, method="GET", data=None):
-        return request_json("https://api.github.com" + path, self.token, method, data)
+        return request_json("https://api.github.com" + path, self.token, method, data, gate=self.rate_gate)
 
     def pages(self, path, limit):
         result = []
@@ -163,11 +315,13 @@ class GitHub:
         }"""
         try:
             result = request_json("https://api.github.com/graphql", self.token, "POST", {
-                "query": query, "variables": {"owner": owner, "name": name, "number": number}})
+                "query": query, "variables": {"owner": owner, "name": name, "number": number}}, gate=self.rate_gate)
             revision = result["data"]["repository"]["issue"]
             if revision["body"] != (issue.get("body") or ""):
                 raise ValueError("Inconsistent issue body snapshots")
             issue["body_updated_at"] = revision["lastEditedAt"] or revision["createdAt"]
+        except RateLimitError:
+            raise
         except (RuntimeError, ValueError, KeyError, TypeError):
             # REST updated_at also changes on comments and labels, so it cannot
             # safely rank a body answer against a comment after this lookup fails.
@@ -181,11 +335,89 @@ class GitHub:
             raise RuntimeError("Issue has too many comments; manual triage is required")
         return comments
 
+    def read_history_cache(self, limit):
+        if not self.cache_path:
+            return None
+        try:
+            if self.cache_path.stat().st_size > 256_000_000:
+                raise ValueError("History cache too large")
+            cache = json.loads(self.cache_path.read_text(encoding="utf-8"))
+            now = time.time()
+            if (cache.get("version") != 1 or cache.get("repository") != self.repository
+                    or cache.get("limit") != limit or not isinstance(cache.get("capped"), bool)
+                    or not all(isinstance(cache.get(key), (int, float)) and not isinstance(cache[key], bool)
+                               and math.isfinite(cache[key]) and 0 <= cache[key] <= now
+                               for key in ("synced_at", "full_synced_at"))
+                    or cache["full_synced_at"] > cache["synced_at"]
+                    or not isinstance(cache.get("items"), list) or len(cache["items"]) > limit):
+                raise ValueError("Invalid history cache")
+            seen = set()
+            for item in cache["items"]:
+                if (not isinstance(item, dict) or not isinstance(item.get("number"), int)
+                        or isinstance(item["number"], bool) or item["number"] <= 0 or item["number"] in seen
+                        or item.get("state") not in {"open", "closed"}
+                        or not isinstance(item.get("title"), str) or len(item["title"]) > 1000
+                        or not isinstance(item.get("body"), str) or len(item["body"]) > 24000
+                        or any(timestamp(item.get(key)) is None for key in ("created_at", "updated_at"))
+                        or set(item) - {"number", "title", "body", "state", "created_at", "updated_at", "pull_request"}):
+                    raise ValueError("Invalid cached issue")
+                seen.add(item["number"])
+            return cache
+        except FileNotFoundError:
+            return None
+        except (OSError, ValueError, AttributeError, TypeError):
+            self.history_notes.append("History cache is invalid or unreadable; using a bounded full refresh.")
+            return None
+
+    def save_history_cache(self, cache):
+        if not self.cache_path:
+            return
+        try:
+            self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = self.cache_path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+            temporary.replace(self.cache_path)
+            self.cache_updated = True
+        except OSError:
+            self.history_notes.append("History cache could not be saved; this run still uses its in-memory snapshot.")
+
     def history(self, limit):
         if limit not in self._history:
-            items = self.pages(self.root + "/issues?state=all&sort=created&direction=desc", limit)
-            self._history[limit] = (items, len(items) == limit)
+            started = time.time()
+            cache = self.read_history_cache(limit)
+            full = cache is None or started - cache["full_synced_at"] >= self.full_sync_interval
+            if not full and started - cache["synced_at"] < self.cache_ttl:
+                items, capped = cache["items"], cache["capped"]
+                self.history_notes.append(f"Reused history cache within its {self.cache_ttl}-second freshness window.")
+            else:
+                if not full:
+                    since = datetime.fromtimestamp(max(0, cache["synced_at"] - 60), timezone.utc).isoformat()
+                    updates = self.pages(self.root + "/issues?" + urlencode({
+                        "state": "all", "sort": "updated", "direction": "desc", "since": since}), limit + 1)
+                    full = len(updates) > limit
+                if full:
+                    items = self.pages(self.root + "/issues?state=all&sort=created&direction=desc", limit)
+                    capped = len(items) == limit
+                    full_synced_at = started
+                    self.history_notes.append("History cache populated by a bounded full refresh.")
+                else:
+                    merged = {item["number"]: item for item in cache["items"]}
+                    merged.update((item["number"], item) for item in updates)
+                    items = sorted(merged.values(), key=lambda item: (item.get("created_at", ""), item["number"]), reverse=True)[:limit]
+                    capped = cache["capped"] or len(merged) >= limit
+                    full_synced_at = cache["full_synced_at"]
+                    self.history_notes.append("History cache incrementally refreshed from updated issues.")
+                # Store only ranking inputs, never tokens, event payloads, comments,
+                # or API-provided URLs that could affect request destinations.
+                items = [{"number": item["number"], "title": (item.get("title") or "")[:1000],
+                          "body": (item.get("body") or "")[:24000], "state": item.get("state", "open"),
+                          "created_at": item.get("created_at"), "updated_at": item.get("updated_at"),
+                          **({"pull_request": {}} if "pull_request" in item else {})} for item in items]
+                self.save_history_cache({"version": 1, "repository": self.repository, "limit": limit,
+                    "synced_at": started, "full_synced_at": full_synced_at, "capped": capped, "items": items})
+            self._history[limit] = (items, capped)
         items, capped = self._history[limit]
+        # Callers extend their own history with searches; keep the shared snapshot isolated.
         return list(items), capped
 
     def search(self, query):
@@ -200,6 +432,8 @@ class GitHub:
                 self.call(self.root + "/labels", "POST", {
                     "name": name, "color": label["color"],
                     "description": label["description"]})
+            except RateLimitError:
+                raise
             except RuntimeError:
                 # Another issue's workflow may have created the same label.
                 self.call(self.root + "/labels/" + quote(name, safe=""))
@@ -231,6 +465,10 @@ def load_config(path=CONFIG):
     for options in config.get("ai_model_options", {}).values():
         if set(options) - {"enable_thinking", "response_format"}:
             raise ValueError("Unsupported model-specific request option")
+    if not 60 <= config.get("history_cache_ttl", 900) <= 3600:
+        raise ValueError("history_cache_ttl must be between 60 and 3600 seconds")
+    if not 3600 <= config.get("history_full_sync_interval", 86400) <= 604800:
+        raise ValueError("history_full_sync_interval must be between 3600 and 604800 seconds")
     disclosure = config["model_disclosure"]
     if not 1 <= disclosure["max_models"] <= 10:
         raise ValueError("max_models must be between 1 and 10")
@@ -261,6 +499,20 @@ def parse_number_ranges(specification, limit):
 
 def select_targets(config, env, event, number=None, issues=None, dispatch=False, numbers=None):
     """Resolve an individual matrix task, a manual batch, or a legacy target."""
+    if env.get("TRIAGE_TARGETS"):
+        try:
+            targets = json.loads(env["TRIAGE_TARGETS"])
+        except (ValueError, TypeError):
+            raise ValueError("Invalid planned targets") from None
+        if targets == [{"number": 0, "kind": "labels"}]:
+            return targets
+        if (not isinstance(targets, list) or not 1 <= len(targets) <= config.get("max_batch_items", 50)
+                or any(not isinstance(target, dict) or set(target) != {"number", "kind"}
+                       or target["kind"] != "issue" or not isinstance(target["number"], int)
+                       or isinstance(target["number"], bool) or not 1 <= target["number"] <= 9999999999 for target in targets)
+                or len({target["number"] for target in targets}) != len(targets)):
+            raise ValueError("Invalid planned targets")
+        return targets
     if env.get("TRIAGE_TARGET_KIND"):
         kind = env["TRIAGE_TARGET_KIND"]
         raw = env.get("TRIAGE_TARGET_NUMBER", "")
@@ -867,12 +1119,13 @@ def submission_field(name):
 def review_state(issue, comments, details, previous):
     if "triage/accepted" in label_names(issue) or any(n.startswith("resolution/") for n in label_names(issue)):
         return {"review_status": "maintainer-reviewed"}
-    if "triage/needs-review" in label_names(issue) and "triage/needs-review" not in previous["managed"]:
-        return {"review_status": "needs-review"}
+    if any(name in label_names(issue) and name not in previous["managed"]
+           for name in ("triage/needs-reproduce", "triage/needs-review")):
+        return {"review_status": "needs-reproduce"}
     if details["conflicts"]:
-        return dict({"review_status": "needs-review"}, **({"request": previous["request"]} if previous.get("request") else {}))
+        return dict({"review_status": "needs-reproduce"}, **({"request": previous["request"]} if previous.get("request") else {}))
     if not details["missing"]:
-        return {"review_status": "needs-review" if (details.get("classification_pending")
+        return {"review_status": "needs-reproduce" if (details.get("classification_pending")
                 or details.get("reproduction_status") == "not-verified") else "complete"}
     request = previous.get("request", {})
     records = report_records(issue, comments, request.get("fields", []), previous)
@@ -884,10 +1137,10 @@ def review_state(issue, comments, details, previous):
     structured = any(declared_fields(record["text"], pattern)
                      for record in changed for pattern in FIELD_PATTERNS.values())
     evidence_changed = bool(request and digest(versions) != request["evidence_sha256"])
-    if ((previous.get("review_status") == "needs-review" and not structured)
+    if ((previous.get("review_status") == "needs-reproduce" and not structured)
             or (evidence_changed and not changed)
             or (changed and not structured and any(meaningful_value(record["text"]) for record in changed))):
-        return dict({"review_status": "needs-review"}, **({"request": request} if request else {}))
+        return dict({"review_status": "needs-reproduce"}, **({"request": request} if request else {}))
     return {"review_status": "needs-information", "request": {
         **source_watermark(records), "evidence_sha256": digest(versions), "body_sha256": versions["body"],
         "fields": list(dict.fromkeys(
@@ -1019,8 +1272,10 @@ def read_state(comment):
                 if any(name not in set(LEGACY_TYPE_LABELS.values()) for name in pending.get("manual_types", [])):
                     return empty
                 result["pending"] = pending
+            if state.get("review_status") == "needs-review":
+                state["review_status"] = "needs-reproduce"
             if "review_status" in state:
-                if state["review_status"] not in {"needs-information", "needs-review", "complete", "maintainer-reviewed"}:
+                if state["review_status"] not in {"needs-information", "needs-reproduce", "complete", "maintainer-reviewed"}:
                     return empty
                 result["review_status"] = state["review_status"]
             if "input_sha256" in state:
@@ -1071,6 +1326,18 @@ def valid_watermark(value):
 
 def recover_state(previous, current):
     """Reconcile a durable intent with the labels actually present after a failure."""
+    # A repository-wide label rename also changes existing assignments, while
+    # older comments still refer to the old label. Preserve their ownership.
+    if "triage/needs-review" not in current:
+        previous = dict(previous)
+        for key in ("managed", "suppressed"):
+            previous[key] = ["triage/needs-reproduce" if name == "triage/needs-review" else name
+                             for name in previous.get(key, [])]
+        if previous.get("pending"):
+            previous["pending"] = dict(previous["pending"])
+            for key in ("add", "remove"):
+                previous["pending"][key] = ["triage/needs-reproduce" if name == "triage/needs-review" else name
+                                            for name in previous["pending"][key]]
     pending = previous.get("pending")
     if pending is None:
         return previous
@@ -1093,7 +1360,7 @@ def label_plan(issue, suggestions, previous, missing=None, review_status=None, b
     # Stored state can never grant the bot ownership of a maintainer-only label.
     def bot_owned(name):
         return name.startswith(("type/", "area/", "ai-model/")) or name in (
-            "needs-triage", "triage/needs-information", "triage/needs-review")
+            "needs-triage", "triage/needs-information", "triage/needs-reproduce", "triage/needs-review")
 
     managed = {n for n in previous["managed"] if bot_owned(n)}
     # The waiting stage is workflow-owned, including labels added by a template.
@@ -1116,8 +1383,8 @@ def label_plan(issue, suggestions, previous, missing=None, review_status=None, b
         desired.add("needs-triage")
     if missing and review_status in (None, "needs-information"):
         desired.add("triage/needs-information")
-    if review_status == "needs-review":
-        desired.add("triage/needs-review")
+    if review_status == "needs-reproduce":
+        desired.add("triage/needs-reproduce")
     desired -= suppressed
     add = desired - current
     remove = (managed & current) - desired
@@ -1152,10 +1419,10 @@ def render_comment(repository, similar, plan, details):
     status = details.get("review_status", "needs-information" if details["missing"] else "complete")
     information = {
         "complete": "No missing required information detected.",
-        "needs-review": "Pending maintainer review; no further information requested for now.",
+        "needs-reproduce": "Pending maintainer review; no further information requested for now.",
         "maintainer-reviewed": "No additional information requested; a maintainer has reviewed this issue.",
     }.get(status)
-    if status == "needs-review" and details.get("reproduction_status") == "not-verified":
+    if status == "needs-reproduce" and details.get("reproduction_status") == "not-verified":
         information = "Pending maintainer review; reproduction has not been verified."
     if information is None:
         information = "Yes. Please provide:\n\n" + "\n".join(
@@ -1219,11 +1486,11 @@ def analyze(github, number, config, apply=False, ai_env=None, target_kind="issue
     suggestions = with_manual_types(suggestions)
     type_locked = bool(manual_types) or any(s["label"].startswith("type/") and s.get("source") == "form" for s in suggestions)
     preliminary = check_submission(issue, comments, with_manual_types(suggestions), config, previous)
-    defer_analysis = (automatic and previous.get("review_status") in {"needs-information", "needs-review"}
+    defer_analysis = (automatic and previous.get("review_status") in {"needs-information", "needs-reproduce"}
                       and not preliminary["classification_pending"]
-                      and review_state(issue, comments, preliminary, previous)["review_status"] == "needs-review")
+                      and review_state(issue, comments, preliminary, previous)["review_status"] == "needs-reproduce")
     history, capped = ([], False) if defer_analysis else github.history(config["history_limit"])
-    notes = []
+    notes = list(getattr(github, "history_notes", []))
     if capped:
         notes.append(f"Recent-history scan reached {config['history_limit']} records (including PRs); keyword searches supplement this scan.")
     for query in ([] if defer_analysis else search_queries(github.repository, issue, text)):
@@ -1232,6 +1499,8 @@ def analyze(github, number, config, apply=False, ai_env=None, target_kind="issue
             history.extend(response["items"])
             if response.get("incomplete_results") or response.get("total_count", 0) > 30:
                 notes.append("Keyword search returned only part of the matching candidates.")
+        except RateLimitError:
+            raise
         except RuntimeError:
             notes.append("Keyword search is unavailable; similarity detection uses the history retrieved so far.")
             break
@@ -1332,10 +1601,17 @@ def analyze(github, number, config, apply=False, ai_env=None, target_kind="issue
 def run_targets(github, targets, config, apply=False, ai_env=None, automatic=False):
     results = []
     counts = {"processed": 0, "skipped": 0, "failed": 0}
+    limited = None
     for target in targets:
         try:
+            if limited is not None:
+                raise limited
             result = analyze(github, target["number"], config, apply, ai_env, target["kind"], automatic)
             status = "skipped" if "skipped" in result else "processed"
+        except RateLimitError as error:
+            limited = error
+            result = {"issue": target["number"], "kind": target["kind"], "error": str(error)}
+            status = "failed"
         except (RuntimeError, ValueError, KeyError) as error:
             result = {"issue": target["number"], "kind": target["kind"], "error": str(error)}
             status = "failed"
@@ -1447,18 +1723,25 @@ def main():
         token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
         if not args.repository or not token:
             parser.error("Set repository and GH_TOKEN (or use --fixture)")
-        github = GitHub(args.repository, token)
-    if sync:
-        if not apply:
-            parser.error("--sync-labels requires --apply")
-        github.ensure_labels(config, config["labels"])
-        result = {"mode": "apply", "synced_labels": sorted(config["labels"])}
-    else:
-        # Never send fixture contents to an external model.
-        ai_env = {} if args.fixture else resolve_ai_env(config, os.environ, event, dispatch)
-        automatic = bool(os.environ.get("GITHUB_EVENT_NAME")) and not dispatch and not args.fixture
-        report = run_targets(github, targets, config, apply, ai_env, automatic)
-        result = report["results"][0] if len(targets) == 1 else report
+        github = GitHub(args.repository, token, os.environ.get("TRIAGE_HISTORY_CACHE"),
+                        config.get("history_cache_ttl", 900), config.get("history_full_sync_interval", 86400))
+    try:
+        if sync:
+            if not apply:
+                parser.error("--sync-labels requires --apply")
+            github.ensure_labels(config, config["labels"])
+            result = {"mode": "apply", "synced_labels": sorted(config["labels"])}
+        else:
+            # Never send fixture contents to an external model.
+            ai_env = {} if args.fixture else resolve_ai_env(config, os.environ, event, dispatch)
+            automatic = bool(os.environ.get("GITHUB_EVENT_NAME")) and not dispatch and not args.fixture
+            report = run_targets(github, targets, config, apply, ai_env, automatic)
+            result = report["results"][0] if len(targets) == 1 else report
+    finally:
+        cache_updated = getattr(github, "cache_updated", False) or getattr(getattr(github, "rate_gate", None), "updated", False)
+        if not args.fixture and cache_updated and os.environ.get("GITHUB_OUTPUT"):
+            with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+                output.write("history_cache_updated=true\n")
     print(json.dumps(result, ensure_ascii=False, indent=2))
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:

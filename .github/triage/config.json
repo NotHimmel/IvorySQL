@@ -7,6 +7,8 @@
     "https://www.kubernetes.dev/docs/guide/issue-triage/"
   ],
   "history_limit": 1000,
+  "history_cache_ttl": 900,
+  "history_full_sync_interval": 86400,
   "max_batch_items": 50,
   "similarity_threshold": 0.24,
   "max_similar": 3,
@@ -121,7 +123,7 @@
     "needs-triage": {"color": "ededed", "description": "Awaiting maintainer triage"},
     "triage/accepted": {"color": "0e8a16", "description": "Accepted for tracking by a maintainer"},
     "triage/needs-information": {"color": "d876e3", "description": "Waiting for specific information from the reporter"},
-    "triage/needs-review": {"color": "fbca04", "description": "Author update or conflicting answers need maintainer review"},
+    "triage/needs-reproduce": {"color": "fbca04", "description": "Needs reproduction or maintainer clarification after an author update or conflicting information"},
     "resolution/duplicate": {"color": "cfd3d7", "description": "Maintainer-confirmed duplicate; link the original issue"},
     "resolution/invalid": {"color": "e4e669", "description": "Not an actionable issue, as determined by a maintainer"},
     "resolution/wontfix": {"color": "ffffff", "description": "Maintainer decision not to implement or fix"},

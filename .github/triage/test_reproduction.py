@@ -61,7 +61,7 @@ class ReproductionTests(unittest.TestCase):
                 body = COMPLETE_BUG.replace("Reproduced in a real environment: Yes", "Reproduced in a real environment: " + answer)
                 result = self.run_triage(FakeGitHub(issue(body=body)))
                 self.assertEqual(result["details"]["missing"], [])
-                self.assertEqual(result["details"]["review_status"], "needs-review")
+                self.assertEqual(result["details"]["review_status"], "needs-reproduce")
                 self.assertIn("reproduction has not been verified", result["comment"])
                 self.assertNotIn("Have you reproduced", result["comment"])
 
@@ -79,7 +79,7 @@ class ReproductionTests(unittest.TestCase):
         self.run_triage(github, apply=True)
         answer = comment("No")
         github.thread.append(answer)
-        self.assertEqual(self.run_triage(github, apply=True)["details"]["review_status"], "needs-review")
+        self.assertEqual(self.run_triage(github, apply=True)["details"]["review_status"], "needs-reproduce")
         answer["body"] = "Yes"
         answer["updated_at"] = "2026-11-02T12:00:00Z"
         self.assertEqual(self.run_triage(github, apply=True)["details"]["review_status"], "complete")
