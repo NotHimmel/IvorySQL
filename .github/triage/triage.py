@@ -334,6 +334,13 @@ class GitHub:
         """Discover enabled native types once per worker, without org permissions."""
         if self._issue_types is None:
             try:
+                # Personal repositories may list default types while silently
+                # dropping writes, even for their owner. Verify org eligibility.
+                repository = self.call(self.root)
+                if repository.get("owner", {}).get("type") != "Organization":
+                    self._issue_types = {}
+                    self.type_notes.append("Native issue types are not enabled for this repository owner; using classification labels.")
+                    return self._issue_types
                 response = self.call(self.root + "/issue-types")
                 if not isinstance(response, list) or len(response) > 100:
                     raise ValueError("Invalid issue type catalog")
@@ -1609,7 +1616,8 @@ def analyze(github, number, config, apply=False, ai_env=None, target_kind="issue
         previous = dict(previous, type_suppressed=True)
 
     def native_unavailable(items):
-        proposed = [item for item in items if item["label"].startswith("type/")]
+        proposed = ([{"label": name} for name in manual_types] if manual_types and not native_locked
+                    else [item for item in items if item["label"].startswith("type/")])
         return bool(current_type and not native_locked and len(proposed) == 1
                     and proposed[0]["label"] != "type/" + str(current_kind)
                     and config["issue_types"].get(proposed[0]["label"].removeprefix("type/"), "").casefold() not in catalog)
@@ -1627,9 +1635,10 @@ def analyze(github, number, config, apply=False, ai_env=None, target_kind="issue
             return areas + [{"label": "type/" + current_kind, "source": "native", "evidence": current_type["name"]}]
         return items
 
-    suggestions = with_manual_types(suggestions)
+    rule_type_unavailable = native_unavailable(suggestions)
     type_locked = native_locked or bool(manual_types) or any(
         item["label"].startswith("type/") and item.get("source") == "form" for item in suggestions)
+    suggestions = with_manual_types(suggestions)
     preliminary = check_submission(issue, comments, with_manual_types(suggestions), config, previous)
     defer_analysis = (automatic and previous.get("review_status") in {"needs-information", "needs-reproduce"}
                       and not preliminary["classification_pending"]
@@ -1656,6 +1665,7 @@ def analyze(github, number, config, apply=False, ai_env=None, target_kind="issue
     if defer_analysis:
         ai_status = "Deferred; the author update is awaiting maintainer review."
     ai_matches = set()
+    adopted_ai_type = False
     ai_error = None
     if any(settings[1:]) and not defer_analysis:
         if not all(settings):
@@ -1665,6 +1675,7 @@ def analyze(github, number, config, apply=False, ai_env=None, target_kind="issue
                 ai_labels, matches = ask_ai(issue, text, candidates, config, *settings)
                 ai_types = [s for s in ai_labels if s["label"].startswith("type/")]
                 if ai_types and not type_locked:
+                    adopted_ai_type = True
                     suggestions = [s for s in suggestions if not s["label"].startswith("type/")] + ai_types
                 if not any(s["label"].startswith("area/") for s in suggestions):
                     suggestions.extend(s for s in ai_labels if s["label"].startswith("area/"))
@@ -1682,9 +1693,11 @@ def analyze(github, number, config, apply=False, ai_env=None, target_kind="issue
     visible = [c for c in candidates if c["number"] in ai_matches or (
         c["score"] >= config["similarity_threshold"] and c["shared_terms"] >= 2)]
     similar = sorted(visible, key=lambda c: (c["relationship"] != "possible-duplicate", -c["score"]))[:config["max_similar"]]
-    unavailable_type = native_unavailable(suggestions)
+    unavailable_type = native_unavailable(suggestions) or (rule_type_unavailable and not adopted_ai_type)
     suggestions = with_manual_types(suggestions)
     details = preliminary if defer_analysis else check_submission(issue, comments, suggestions, config, previous)
+    if current_type and details["classification_pending"]:
+        details["type_pending"] = True
     if unavailable_type:
         details["type_pending"] = True
         notes.append("The proposed native type is not enabled; the current type is retained for maintainer review.")

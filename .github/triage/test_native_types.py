@@ -291,6 +291,46 @@ class NativeTypeTests(unittest.TestCase):
         self.assertNotIn('type/enhancement', github.current['labels'])
         self.assertEqual(result['details']['review_status'], 'needs-reproduce')
 
+    def test_rule_only_classification_waits_for_an_unavailable_native_target(self):
+        github = NativeGitHub(issue(body=COMPLETE_BUG))
+        self.run_triage(github)
+        del github.catalog['enhancement']
+        github.current['title'] = 'Enhancement: improve psql completion'
+        result = self.run_triage(github)
+        self.assertEqual(github.current['type']['name'], 'Bug')
+        self.assertEqual(result['details']['review_status'], 'needs-reproduce')
+        self.assertTrue(result['details']['type_pending'])
+
+    def test_unavailable_form_type_remains_locked_against_ai(self):
+        github = NativeGitHub(issue(body=COMPLETE_BUG))
+        self.run_triage(github)
+        del github.catalog['enhancement']
+        github.current['body'] += '\nIssue type: enhancement'
+        with patch('triage.ask_ai', return_value=([{'label': 'type/feature', 'source': 'ai', 'evidence': 'subscription'}], {})):
+            result = self.run_triage(github, ai_env=self.ai)
+        self.assertEqual(github.current['type']['name'], 'Bug')
+        self.assertTrue(result['details']['type_pending'])
+
+    def test_manual_label_for_a_missing_native_target_is_preserved_until_configuration(self):
+        github = NativeGitHub(issue(body=COMPLETE_BUG))
+        self.run_triage(github)
+        del github.catalog['enhancement']
+        github.current['labels'].append('type/enhancement')
+        result = self.run_triage(github)
+        self.assertEqual(github.current['type']['name'], 'Bug')
+        self.assertIn('type/enhancement', github.current['labels'])
+        self.assertTrue(result['details']['type_pending'])
+
+    def test_conflicting_manual_labels_are_not_deleted_during_native_reconciliation(self):
+        github = NativeGitHub(issue(body=COMPLETE_BUG))
+        self.run_triage(github)
+        github.current['labels'].extend(['type/feature', 'type/enhancement'])
+        result = self.run_triage(github)
+        self.assertEqual(github.current['type']['name'], 'Bug')
+        self.assertIn('type/feature', github.current['labels'])
+        self.assertIn('type/enhancement', github.current['labels'])
+        self.assertEqual(result['details']['review_status'], 'needs-reproduce')
+
     def test_manual_removal_of_an_old_bot_type_label_is_not_bypassed_by_native_types(self):
         github = NativeGitHub(issue(body=COMPLETE_BUG), catalog={})
         self.run_triage(github)
@@ -314,10 +354,20 @@ class NativeTypeTests(unittest.TestCase):
 class TypeDiscoveryAndValidationTests(unittest.TestCase):
     def test_repository_catalog_is_cached_and_disabled_types_are_excluded(self):
         github = triage.GitHub('example/postgres', 'key')
-        with patch.object(github, 'call', return_value=[CATALOG['bug'], dict(CATALOG['feature'], is_enabled=False)]) as call:
+        with patch.object(github, 'call', side_effect=[{'owner': {'type': 'Organization'}},
+                [CATALOG['bug'], dict(CATALOG['feature'], is_enabled=False)]]) as call:
             self.assertEqual(github.issue_types(), {'bug': CATALOG['bug']})
             self.assertEqual(github.issue_types(), {'bug': CATALOG['bug']})
-        call.assert_called_once_with('/repos/example/postgres/issue-types')
+        self.assertEqual([args.args[0] for args in call.call_args_list],
+                         ['/repos/example/postgres', '/repos/example/postgres/issue-types'])
+
+    def test_personal_repository_does_not_trust_a_misleading_default_type_catalog(self):
+        github = triage.GitHub('example/postgres', 'key')
+        with patch.object(github, 'call', return_value={'owner': {'type': 'User'}}) as call:
+            self.assertEqual(github.issue_types(), {})
+            self.assertEqual(github.issue_types(), {})
+        call.assert_called_once_with('/repos/example/postgres')
+        self.assertTrue(github.type_notes)
 
     def test_unavailable_catalog_falls_back_but_rate_limits_propagate(self):
         for status in (403, 404, 503):

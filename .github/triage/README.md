@@ -70,10 +70,12 @@ priority of the original classification, including after an interrupted writebac
 organization type names. The worker reads enabled types once from
 `GET /repos/{owner}/{repo}/issue-types`, requiring only repository metadata read
 access, and uses `PATCH /repos/{owner}/{repo}/issues/{number}` with `type` to set
-the chosen value. Discovery is capability-based, rather than assuming that an
-owner account category guarantees support. Missing/disabled types or an unavailable
-catalog keep the existing label fallback; type discovery does not create or modify
-organization settings. Organization owners can add `Enhancement` later and replay
+the chosen value. First verify that the repository is organization-owned: personal
+repositories can expose a default type catalog while silently ignoring type writes,
+even with owner credentials. For organizations, inspect enabled names rather than
+assuming the required types exist. Personal repositories, missing/disabled types,
+or an unavailable catalog keep the existing label fallback. Discovery does not
+create or modify organization settings. Organization owners can add `Enhancement` later and replay
 the issues. `sync-labels` omits fallback type labels whose native types are enabled.
 The fallback definitions remain in `labels` for matching, colors, and compatibility.
 
