@@ -298,7 +298,7 @@ class UpdateTests(unittest.TestCase):
                 github.current["body"] += "\nNew evidence changes the report."
             return result
 
-        with patch.object(github, "call", side_effect=changed_after_journal), self.assertRaisesRegex(RuntimeError, "before label writes"):
+        with patch.object(github, "call", side_effect=changed_after_journal), self.assertRaisesRegex(RuntimeError, "before classification writes"):
             self.run_triage(github)
         self.assertEqual(github.current["labels"], [])
         self.assertIn("pending", self.state(github))

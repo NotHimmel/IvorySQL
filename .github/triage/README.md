@@ -13,8 +13,10 @@ Existing repository PR governance and CI workflows are independent of this tool.
 [config.json](config.json) defines label descriptions, colors, matching rules,
 thresholds, and limits:
 
-- Types: `type/bug`, `type/feature`, `type/enhancement`; select at most one, or abstain.
-  Regressions are bugs; features add capabilities; enhancements improve existing ones.
+- Types: select `bug`, `feature`, or `enhancement`, or abstain. The `issue_types`
+  mapping defaults to native `Bug`, `Feature`, and `Enhancement`. Regressions are
+  bugs; features add capabilities; enhancements improve existing ones. When the
+  matching native type is unavailable, use its `type/*` label as a fallback.
 - Areas: at most two of the 20 `area/*` labels, mapped from PostgreSQL subsystems.
   These are repository labels based on PG documentation, not official PG issue labels.
 - Models: `ai-model/*` records the model explicitly declared by the reporter.
@@ -40,7 +42,7 @@ thresholds, and limits:
   triage runs, including manual runs. The bot never adds this label. Removing it
   allows processing on the next supported event or manual run.
 
-Manual classification labels take precedence. Except for the workflow-managed
+An existing manual native Issue Type has first priority, followed by manual classification labels. Except for the workflow-managed
 `needs-triage` stage, the bot removes only labels it added and recorded in its
 comment, plus redundant legacy type assignments after confirming their canonical
 replacement. A manually set information-request label is also retained. Removing a
@@ -52,12 +54,55 @@ state. Missing, malformed, or copied user-authored state cannot claim ownership.
 Adding or removing labels does not trigger a run. Use a manual `apply` run to
 reconcile stage labels immediately, or wait for the next supported event.
 
-Templates use only `type/bug`, `type/feature`, or `type/enhancement`. When an issue
-still carries a legacy type label, apply adds or confirms its canonical replacement
-before removing the redundant assignment. Legacy `enhancement` is also redundant
+Templates retain portable `type/bug`, `type/feature`, or `type/enhancement`
+bootstrap labels so they remain usable before organization types are configured.
+The bot migrates them into the native Type when available and removes known
+redundant type assignments after verifying the field. Without native support,
+apply adds or confirms the canonical fallback label before removing a redundant
+legacy assignment. Legacy `enhancement` is also redundant
 when an explicit `type/feature` exists, matching older feature templates. Conflicting
 type assignments are left for maintainers. The normalized label retains the manual
 priority of the original classification, including after an interrupted writeback.
+
+## Native Issue Types and label fallback
+
+`issue_types` maps the classifier's `bug`, `feature`, and `enhancement` values to
+organization type names. The worker reads enabled types once from
+`GET /repos/{owner}/{repo}/issue-types`, requiring only repository metadata read
+access, and uses `PATCH /repos/{owner}/{repo}/issues/{number}` with `type` to set
+the chosen value. Discovery is capability-based, rather than assuming that an
+owner account category guarantees support. Missing/disabled types or an unavailable
+catalog keep the existing label fallback; type discovery does not create or modify
+organization settings. Organization owners can add `Enhancement` later and replay
+the issues. `sync-labels` omits fallback type labels whose native types are enabled.
+The fallback definitions remain in `labels` for matching, colors, and compatibility.
+
+Native Type is authoritative when manually set. Bot-owned Types can be updated
+when the report's classification changes; manually migrated label/form choices
+retain manual priority. A human Type edit transfers ownership to the human, and a
+human clear freezes automatic type assignment rather than replacing the field
+with a fallback label. The `typed` and `untyped` events capture those actions,
+including a clear before the first bot run. Delete the bot comment to reset state,
+or choose a native Type explicitly. A temporarily unavailable proposed type does
+not produce a contradictory label alongside a different existing native Type.
+
+A native write is journaled before it happens and is reread before old type labels
+are removed. Rejected or silently ignored writes fail the target and preserve its
+old labels; they do not report successful migration. Interrupted writes recover
+from the observed native value, including lost API responses. Human changes during
+analysis or recovery are preserved. The input fingerprint includes the native
+field and enabled type catalog, so later activation of an organization type can
+migrate fallback labels on the next supported event or manual run. The public bot
+comment remains short; native change plans are available in preview diagnostics.
+
+An organization-only deployment may set the form's top-level `type: Bug` (or
+`Feature` / `Enhancement`) and remove its bootstrap label once those types exist.
+The shared templates avoid that requirement so the same PR can still be tested
+in a fork where form-level native types may not be supported.
+
+See [repository type discovery](https://docs.github.com/en/rest/repos/issue-types),
+[issue updates](https://docs.github.com/en/rest/issues/issues#update-an-issue), and
+[organization type settings](https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/managing-issue-types-in-an-organization).
 
 ## Renaming the previous review label
 
@@ -84,9 +129,12 @@ submissions and free-form reports receive the same checks.
 | Bugs with prose or unfenced reproduction instructions | Whether the author personally reproduced the problem with the reported version |
 | Database behavior bugs | Compatible mode and server encoding, or an explicit not-applicable explanation |
 
-The type comes from an existing manual type label (including legacy `bug`,
-`feature`, `feature-request`, and `enhancement` labels), an optional explicit form
-choice, AI classification, or fallback rules, in that order. An unresolved type is
+The type comes first from an existing manual native Type, then an existing manual
+type label (including legacy `bug`, `feature`, `feature-request`, and `enhancement`
+labels), an optional explicit form choice, AI classification, or fallback rules.
+An existing native Type outside the configured mapping is preserved and routed
+to maintainers, without guessing a replacement. Required fields use the effective
+native classification or the planned classification for an initially untyped report. An unresolved type is
 a maintainer task and is never requested from the author. Other clear information
 gaps can still be requested. Build-only
 reports do not need running-server settings. Feature and enhancement requests do
@@ -261,7 +309,7 @@ in place. [example-comment.md](example-comment.md) is the tested offline renderi
 
 ## Interrupted writeback
 
-Before changing issue labels, an apply run saves a pending writeback record in the
+Before changing the native Type or issue labels, an apply run saves a pending writeback record in the
 same trusted bot comment. If saving the record fails, issue labels are not changed.
 The record retains previous ownership and planned additions/removals. After the
 label requests succeed, the comment is finalized with the resulting ownership.
@@ -285,7 +333,7 @@ comment until recovery completes so that ownership evidence is not lost.
 
 Automatic jobs wait 15 seconds before reading the current issue so rapid author
 edits can settle. Writes for one issue remain serialized. The saved input hash
-includes title/body, author supplements, labels, policy/configuration, comment
+includes title/body, author supplements, labels, native Type/catalog, policy/configuration, comment
 template, and model settings. When these match a successfully published result,
 an automatic event skips history scans, search, model calls, and writes. A pending
 writeback record always bypasses this shortcut. Manual runs always analyze afresh,
@@ -316,8 +364,8 @@ branch. Both planning and execution always check out that branch.
    `AUTO_APPLY=true` to enable automatic label and comment writes. Otherwise event-triggered
    runs are previews. Manual preview is always read-only.
 
-The workflow listens to issue creation, edits, and reopening, plus creation,
-editing, or deletion of reporter comments. Adding or removing labels does not
+The workflow listens to issue creation, edits, reopening, native typing/untyping,
+and creation, editing, or deletion of reporter comments. Adding or removing labels does not
 trigger analysis. Bot events are ignored.
 Closed, unavailable, opted-out, and PR entries are skipped with an explanation.
 
@@ -449,9 +497,12 @@ and [log masking](https://docs.github.com/en/actions/reference/workflows-and-act
 
 The chat completion protocol sends `model`, system/user `messages`, `temperature: 0`,
 and `max_tokens: 3000`; the default model also receives JSON Object response format.
-`choices[0].message.content` must contain a JSON object with `labels` and `similar`
-arrays. Labels require an allowed type/area, a confidence score of at least
-`ai_threshold`, and an exact evidence quote. Model scores are uncalibrated.
+`choices[0].message.content` must contain a JSON object with a `type` object (or
+null), an area `labels` array, and a `similar` array. The type object carries
+`name`, `confidence`, and `evidence`. Types and areas require an allowed value,
+a confidence score of at least `ai_threshold`, and an original evidence quote.
+Legacy AI output using `type/*` label entries remains accepted, but does not create
+such labels when a native Type can be used. Model scores are uncalibrated.
 Similar entries require a retrieved number, `related` or `possible-duplicate`,
 a reason in English, and `evidence_current` / `evidence_candidate` quotes.
 Conflicting types are discarded; model results do not override explicit rule groups.

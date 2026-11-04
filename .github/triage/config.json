@@ -9,6 +9,7 @@
   "history_limit": 1000,
   "history_cache_ttl": 900,
   "history_full_sync_interval": 86400,
+  "issue_types": {"bug": "Bug", "feature": "Feature", "enhancement": "Enhancement"},
   "max_batch_items": 50,
   "similarity_threshold": 0.24,
   "max_similar": 3,

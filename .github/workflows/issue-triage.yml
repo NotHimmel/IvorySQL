@@ -2,7 +2,7 @@ name: Issue triage
 
 on:
   issues:
-    types: [opened, edited, reopened]
+    types: [opened, edited, reopened, typed, untyped]
   issue_comment:
     types: [created, edited, deleted]
   workflow_dispatch:
